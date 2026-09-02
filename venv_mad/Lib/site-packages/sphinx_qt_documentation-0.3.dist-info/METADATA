@@ -1,0 +1,45 @@
+Metadata-Version: 2.1
+Name: sphinx-qt-documentation
+Version: 0.3
+Summary: Plugin for proper resolve intersphinx references for Qt elements
+Home-page: https://github.com/Czaki/sphinx-qt-documentation
+Author: Grzegorz Bokota
+Author-email: bokota@gmail.com
+License: BSD-3-Clause
+Keywords: Sphinx,Qt,PyQt5,PySide2
+Platform: Linux
+Platform: Windows
+Platform: MacOs
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Operating System :: OS Independent
+Classifier: Development Status :: 3 - Alpha
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+Requires-Dist: sphinx
+Requires-Dist: docutils
+
+# Sphinx Qt documentation
+
+This is plugin to add cross link to qt documentation for python code created with PyQt5 or PySide2.
+
+Currently it support `qtpy`, `Qt.py` wrappers and `PyQt5` and `PySide2`.
+
+This extension provides one configuration option:
+
+`qt_documentation` with possible values:
+
+* PyQt5 - linking to PyQt documentation on https://www.riverbankcomputing.com/static/Docs/PyQt5/ (incomplete)
+* Qt5 - linking to Qt5 documentation on "https://doc.qt.io/qt-5/" (default)
+* PySide2 - linking to PySide2 documentation on  "https://doc.qt.io/qtforpython/PySide2/"
+
+For default this extension use `inv` file from PyQt5 to resolve objects.
+to overwrite this behaviour set another url for `intersphinx_mapping[PyQt5]` ex.:
+
+```python
+intersphinx_mapping = {...
+                       "PyQt5": (custom_url, None),
+                       ...}
+```
+
+
