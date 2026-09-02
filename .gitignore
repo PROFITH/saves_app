@@ -1,0 +1,97 @@
+# ============================================================================
+# Python
+# ============================================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+venv_*/
+ENV/
+env/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checkers / linters
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# ============================================================================
+# IDEs / editors
+# ============================================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# Operating system
+# ============================================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================================
+# SAVES temporary / test files
+# ============================================================================
+
+# Ad-hoc test scripts
+test_*.py
+
+# Temporary output
+tmp/
+temp/
+*.tmp
+
+# Logs
+*.log
+
+# ============================================================================
+# Study data
+# ============================================================================
+
+# Video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wmv
+
+# Sensor data
+*.csv
+*.bin
+*.dat
+*.cwa
+*.gt3x
+*.sav
+
+# Session exports / generated metadata
+session_manifest.json
+sync_windows.csv
+activity_markers.csv
+
+# ============================================================================
+# Generated analysis / synchronization output
+# ============================================================================
+
+sync.xlsx
+qc.json
