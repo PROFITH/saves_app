@@ -1,9 +1,10 @@
 import struct
 from pathlib import Path
+
 import pandas as pd
-from PySide2.QtWidgets import QApplication
-from PySide2.QtCore import QTimer
 from mad_gui import BaseImporter
+from PySide2.QtCore import QTimer
+from PySide2.QtWidgets import QApplication
 
 from importers.matrix_importer import MatrixImporter
 from importers.multi_device_dialog import MultiDeviceLoadDialog
