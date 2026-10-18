@@ -45,3 +45,23 @@ class Matrix2ActivityLabel(BaseRegionLabel):
     min_height = 0
     max_height = 1
     descriptions: ClassVar[dict[str, Optional[dict]]] = BASE_DESCRIPTIONS
+
+class AxivityActivityLabel(BaseRegionLabel):
+    name = "Axivity (acceleration)"
+    min_height = 0
+    max_height = 1
+    descriptions: ClassVar[dict[str, Optional[dict]]] = BASE_DESCRIPTIONS
+
+
+class Axivity1ActivityLabel(BaseRegionLabel):
+    name = "Axivity #1"
+    min_height = 0
+    max_height = 1
+    descriptions: ClassVar[dict[str, Optional[dict]]] = BASE_DESCRIPTIONS
+
+
+class Axivity2ActivityLabel(BaseRegionLabel):
+    name = "Axivity #2"
+    min_height = 0
+    max_height = 1
+    descriptions: ClassVar[dict[str, Optional[dict]]] = BASE_DESCRIPTIONS
