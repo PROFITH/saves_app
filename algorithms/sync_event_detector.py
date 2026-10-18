@@ -15,6 +15,8 @@ class SyncEventDetector:
 
     - ``static_prep``: select the last sufficiently prominent candidate.
     - ``static_post``: select the first sufficiently prominent candidate.
+    - ``transition_lap``: select the most prominent candidate (the protocol
+      app also allows synchronization claps between activities).
 
     No fixed temporal interval between claps is assumed.
     """
@@ -80,6 +82,13 @@ class SyncEventDetector:
         elif window.phase == "static_post":
             selected = prominent_candidates[0]
             selection = "first_prominent_candidate"
+
+        elif window.phase == "transition_lap":
+            selected = max(
+                prominent_candidates,
+                key=lambda candidate: candidate["prominence"],
+            )
+            selection = "most_prominent_candidate"
 
         else:
             raise ValueError(

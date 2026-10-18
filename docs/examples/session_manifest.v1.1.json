@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.1",
+  "session_id": "session_20261027_093000",
+  "created_by": "lab_protocol_timer",
+  "session_start_time_utc": "2026-10-27T08:30:00.000Z",
+  "session_end_time_utc": "2026-10-27T08:34:00.000Z",
+  "protocol": {
+    "protocol_id": "run4health_day0",
+    "protocol_version": "1"
+  },
+  "participants": [
+    {
+      "participant_id": "R4H001",
+      "redcap_event_name": "da_0__visita_inici_arm_1"
+    }
+  ],
+  "activities": [
+    {
+      "activity_index": 1,
+      "activity_start_time_utc": "2026-10-27T08:30:40.000Z",
+      "activity_end_time_utc": "2026-10-27T08:32:40.000Z",
+      "duration_seconds": 120.0,
+      "activity_name": "Caminar en llano, ritmo moderado",
+      "compendium_code": "17200",
+      "planned_duration_seconds": 120
+    }
+  ],
+  "sync_windows": [
+    {
+      "event_id": "sync_1",
+      "event_type": "manual_sync",
+      "activity_index": 1,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-27T08:30:20.000Z",
+      "window_end_time_utc": "2026-10-27T08:30:30.000Z"
+    },
+    {
+      "event_id": "sync_2",
+      "event_type": "manual_sync",
+      "activity_index": 1,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-27T08:32:52.000Z",
+      "window_end_time_utc": "2026-10-27T08:33:02.000Z"
+    }
+  ],
+  "video": {
+    "files": [
+      "session_20261027_093000_cam1.mp4"
+    ]
+  },
+  "sensors": {
+    "polar_h10": {
+      "present": true,
+      "timestamp_domain": "native_plus_host_utc",
+      "device_name": "Polar H10",
+      "placement": "chest",
+      "connection": "live"
+    },
+    "ax3_wrist_nd": {
+      "present": true,
+      "timestamp_domain": "device_clock_local",
+      "device_name": "Axivity AX3",
+      "placement": "non-dominant wrist",
+      "connection": "offline"
+    },
+    "matrix_wrist_nd": {
+      "present": true,
+      "timestamp_domain": "device_clock_utc",
+      "device_name": "Parmay Matrix",
+      "placement": "non-dominant wrist",
+      "connection": "offline"
+    }
+  }
+}

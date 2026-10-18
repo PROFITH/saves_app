@@ -5,6 +5,8 @@ from typing import Union
 
 from models import Activity, Participant, Session, SyncWindow
 
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+
 
 class ManifestImporter:
     """Load a SAVES session manifest into domain models."""
@@ -63,9 +65,29 @@ class ManifestImporter:
 
         return timestamp.astimezone(timezone.utc)
 
+    @staticmethod
+    def _first_present(data: dict, keys: tuple[str, ...]) -> str:
+        """
+        Return the value of the first key present in ``data``.
+
+        Manifests written by lab_protocol_timer before schema 1.1 used
+        ``window_start`` / ``window_end`` instead of the documented
+        ``window_start_time_utc`` / ``window_end_time_utc``. Both are
+        accepted so that existing sessions remain readable.
+        """
+        for key in keys:
+            if key in data:
+                return data[key]
+
+        raise KeyError(
+            "None of the expected keys is present: " + ", ".join(keys)
+        )
+
     @classmethod
     def _parse_activity(cls, data: dict) -> Activity:
         """Convert one manifest activity into an Activity model."""
+        planned = data.get("planned_duration_seconds")
+
         return Activity(
             activity_index=int(data["activity_index"]),
             start_time=cls._parse_datetime(
@@ -75,6 +97,15 @@ class ManifestImporter:
                 data["activity_end_time_utc"]
             ),
             duration_seconds=float(data["duration_seconds"]),
+            activity_name=data.get("activity_name"),
+            compendium_code=(
+                str(data["compendium_code"])
+                if data.get("compendium_code") is not None
+                else None
+            ),
+            planned_duration_seconds=(
+                float(planned) if planned is not None else None
+            ),
         )
 
     @classmethod
@@ -86,10 +117,16 @@ class ManifestImporter:
             activity_index=int(data["activity_index"]),
             phase=str(data["phase"]),
             window_start=cls._parse_datetime(
-                data["window_start_time_utc"]
+                cls._first_present(
+                    data,
+                    ("window_start_time_utc", "window_start"),
+                )
             ),
             window_end=cls._parse_datetime(
-                data["window_end_time_utc"]
+                cls._first_present(
+                    data,
+                    ("window_end_time_utc", "window_end"),
+                )
             ),
         )
 
@@ -171,7 +208,7 @@ class ManifestImporter:
                 + ", ".join(missing)
             )
 
-        if manifest["schema_version"] != "1.0":
+        if manifest["schema_version"] not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValueError(
                 f"Unsupported manifest schema version: "
                 f"{manifest['schema_version']}"
