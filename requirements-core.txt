@@ -1,0 +1,4 @@
+# Headless processing (readers, synchronization pipeline, CLI)
+numpy>=1.21
+pandas>=2.0
+scipy>=1.7
