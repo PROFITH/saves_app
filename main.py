@@ -1,41 +1,11 @@
-from mad_gui import start_gui
+"""Start SAVES Studio, the synchronization desktop app.
 
-from importers.axivity_importer import AxivityImporter
-from importers.combined_importer import UniversalStudyImporter
-from importers.matrix_importer import MatrixImporter
-from importers.sens_importer import SensImporter
-from labels.activity_labels import (
-    Axivity1ActivityLabel,
-    Axivity2ActivityLabel,
-    AxivityActivityLabel,
-    Matrix1ActivityLabel,
-    Matrix2ActivityLabel,
-    MatrixActivityLabel,
-    Sens1ActivityLabel,
-    SensActivityLabel,
-)
+The previous MaD GUI viewer is still available with ``python main_madgui.py``.
+"""
 
+import sys
 
-def main():
-    start_gui(
-        plugins=[
-            UniversalStudyImporter,
-            SensImporter,
-            MatrixImporter,
-            AxivityImporter,
-        ],
-        labels=[
-            SensActivityLabel,
-            MatrixActivityLabel,
-            Sens1ActivityLabel,
-            Matrix1ActivityLabel,
-            Matrix2ActivityLabel,
-            AxivityActivityLabel,
-            Axivity1ActivityLabel,
-            Axivity2ActivityLabel,
-        ],
-    )
-
+from studio.ui.app import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv))

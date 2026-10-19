@@ -5,7 +5,8 @@ SAVES synchronizes offline wearable sensors with each other and with video after
 The project has two layers:
 
 - **Headless core** (`readers/`, `algorithms/`, `pipeline/`, `cli.py`): sensor readers, clap detection, offset and drift estimation and quality reports. It needs only numpy, pandas and scipy, so it can process many sessions in batch.
-- **Desktop GUI** (`main.py`, `importers/`, `labels/`): built on [MaD GUI](https://github.com/mad-lab-fau/mad-gui) for visual inspection, video playback and manual labelling.
+- **SAVES Studio** (`main.py`, `studio/`): desktop app to synchronize the sensors and the video of a session, check the result and export it. The logic lives in `studio/` without Qt (project file, file discovery, signal cache, synchronization engine, video and audio); `studio/ui/` holds the PySide6 windows.
+- **Legacy viewer** (`main_madgui.py`, `importers/`, `labels/`): built on [MaD GUI](https://github.com/mad-lab-fau/mad-gui) for manual labelling.
 
 ## Supported sensors
 
@@ -42,13 +43,26 @@ For every sync window logged by the protocol app, SAVES detects the clap in each
 
 Use `--window-pad` (seconds, default 2) when an offline clock is far from the protocol app clock.
 
-## Desktop GUI
+## SAVES Studio
 
 ```sh
-python main.py
+pip install -r requirements-core.txt -r requirements-gui.txt   # Python 3.10-3.13, no MaD GUI needed
+python main.py            # or: python main.py path/to/session_folder
+python main.py --demo     # synthetic session with four sensors and a video
 ```
 
-Requires MaD GUI and PySide2 in addition to the core requirements.
+Workflow:
+
+1. **Drop the session folder** (or use *Abrir sesión*). Studio finds `session_manifest.json`, the videos, `video_sync_session_*.csv` and every sensor file (`.cwa`, Matrix `.bin`, SENS `.csv`, Polar ACC `.csv`) in the folder and its direct subfolders, and guesses each sensor's location from the file name. Files kept elsewhere can be dropped on the window or added with *Añadir archivos*.
+2. Sensors load in the background. Each file is decoded once and cached in `.saves_cache/` next to it, together with a min/max pyramid so hours of data scroll smoothly.
+3. Claps are detected in every sync window and each sensor is fitted against the reference (automatic: Polar ACC, else the video claps, else the sensor with most claps). The banner always says the next step, and the quality table shows offset, drift and residual error per sensor.
+4. **Correct**: drag a clap line, right-click to exclude it or to put the clap where you clicked; double-click a row of the *Palmadas* table to jump to it.
+5. **Video**: select a clap (N/P), step frame by frame (←/→) to the impact and press **M**; Studio moves on to the next clap. *Detectar palmadas en el audio* does it automatically when the video has sound. Until claps are marked, the video clock comes from `video_sync_session_*.csv`.
+6. **Export** (Ctrl+E) writes `sync_report.csv`, `anchors.csv`, `video_events.csv`, `activities_<sensor>.csv` (activity times on each sensor's own clock), `qc.json` and, optionally, the aligned signals.
+
+All decisions (sensors, locations, reference, manual claps, exclusions, video marks) are saved automatically in `saves_project.json` in the session folder, with relative paths, so a session can be reopened or moved.
+
+The old MaD GUI viewer is still available with `python main_madgui.py` (needs MaD GUI and PySide2).
 
 ## Tests
 

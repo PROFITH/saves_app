@@ -95,3 +95,5 @@ activity_markers.csv
 
 sync.xlsx
 qc.json
+# SAVES Studio caches and project files written next to the data
+.saves_cache/
