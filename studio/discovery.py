@@ -80,10 +80,11 @@ def _normalize(text: str) -> str:
 
 def guess_location(file_name: str, sensor_format: str) -> str:
     """Guess the body location from tokens in the file name."""
-    if sensor_format == "polar_acc":
-        return "Pecho"
     stem = re.sub(r"non?[_\- ]?domin\w*", "nondom", _normalize(Path(file_name).stem))
     tokens = set(re.split(r"[^a-z0-9]+", stem))
+    if sensor_format == "polar_acc":
+        # Polar H10 on the chest unless the name says Verity Sense (arm).
+        return "Brazo" if tokens.intersection(("verity", "arm", "brazo")) else "Pecho"
     for words, location in _LOCATION_HINTS:
         if tokens.intersection(words):
             return location

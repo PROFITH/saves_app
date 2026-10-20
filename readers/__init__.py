@@ -31,6 +31,7 @@ FORMAT_BY_SENSOR_TYPE = {
     "matrix": "matrix",
     "sens": "sens",
     "polar_h10": "polar_acc",
+    "verity_sense": "polar_acc",
 }
 
 
