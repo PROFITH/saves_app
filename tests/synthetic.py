@@ -247,6 +247,162 @@ def write_matrix_bin(
     path.write_bytes(bytes(512) + header + b"".join(packages))
 
 
+def _dotnet_ticks(local: datetime) -> int:
+    return int((local - datetime(1, 1, 1)).total_seconds()) * 10_000_000
+
+
+def _pack_12bit_yxz(counts_xyz: np.ndarray) -> bytes:
+    """Pack samples as a big-endian stream of 12-bit y, x, z values."""
+    values = counts_xyz[:, [1, 0, 2]].astype(np.int64).ravel() & 0xFFF
+    bits = ((values[:, None] >> np.arange(11, -1, -1)) & 1).astype(np.uint8).ravel()
+    return np.packbits(bits).tobytes()
+
+
+def write_gt3x(
+    path: Path,
+    start_local: datetime,
+    xyz_g: np.ndarray,
+    rate: int = 30,
+    scale: float = 256.0,
+    idle_seconds: tuple[int, ...] = (),
+    record_type: int = 0x1A,
+    layout: str = "log.bin",
+    timezone_offset: str = "01:00:00",
+    trailing_idle_s: int = 0,
+) -> None:
+    """
+    Write an ActiGraph .gt3x zip. ``xyz_g`` holds the samples of the
+    recorded seconds only; ``idle_seconds`` are seconds without a record
+    (idle sleep), bracketed by idle-sleep events.
+    """
+    import zipfile
+
+    counts = np.round(xyz_g * scale).astype(np.int64)
+    n_recorded = counts.shape[0] // rate
+    total_seconds = n_recorded + len(idle_seconds)
+    last_local = start_local + timedelta(seconds=total_seconds + trailing_idle_s)
+    info = "\n".join([
+        "Serial Number: TAS1H00000001",
+        "Device Type: wGT3XBT",
+        "Firmware: 1.9.2",
+        f"Sample Rate: {rate}",
+        f"Start Date: {_dotnet_ticks(start_local)}",
+        f"Stop Date: {_dotnet_ticks(last_local)}",
+        f"Last Sample Time: {_dotnet_ticks(last_local)}",
+        f"TimeZone: {timezone_offset}",
+        f"Acceleration Scale: {scale}",
+        "Acceleration Min: -8.0",
+        "Acceleration Max: 8.0",
+    ]) + "\n"
+
+    def record(kind: int, local_s: int, payload: bytes) -> bytes:
+        head = struct.pack("<BBIH", 0x1E, kind, local_s, len(payload))
+        checksum = 0xFF
+        for byte in head + payload:
+            checksum ^= byte
+        return head + payload + bytes([(~checksum) & 0xFF])
+
+    start_s = int((start_local - datetime(1970, 1, 1)).total_seconds())
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("info.txt", info)
+        if layout == "activity.bin":
+            archive.writestr("activity.bin", _pack_12bit_yxz(counts))
+            return
+        log = bytearray()
+        k = 0
+        idle = set(idle_seconds)
+        for second in range(total_seconds):
+            t = start_s + second
+            if second in idle:
+                if second - 1 not in idle:
+                    log += record(0x03, t, b"\x08")
+                continue
+            if second - 1 in idle:
+                log += record(0x03, t, b"\x09")
+            chunk = counts[k * rate:(k + 1) * rate]
+            k += 1
+            if record_type == 0x1A:
+                payload = chunk.astype("<i2").tobytes()
+            else:
+                payload = _pack_12bit_yxz(chunk)
+            log += record(record_type, t, payload)
+        log += record(0x1A, start_s + total_seconds, b"Z")  # USB marker, no samples
+        archive.writestr("log.bin", bytes(log))
+
+
+def write_geneactiv_bin(
+    path: Path,
+    start_local: datetime,
+    xyz_g: np.ndarray,
+    rate: float = 100.0,
+    gains=(25875, 25734, 25538),
+    offsets=(439, -662, -3056),
+    time_zone: str = "GMT +01:00",
+    truncate_last_page: bool = False,
+) -> None:
+    """Write a GENEActiv .bin text file with pages of 300 samples."""
+    n_pages = xyz_g.shape[0] // 300
+    header = [
+        "Device Identity",
+        "Device Unique Serial Code:045678",
+        "Device Type:GENEActiv",
+        "",
+        "Device Capabilities",
+        "Accelerometer Range:-8 to 8",
+        "",
+        "Configuration Info",
+        f"Measurement Frequency:{rate:g} Hz",
+        f"Start Time:{start_local:%Y-%m-%d %H:%M:%S}:000",
+        f"Time Zone:{time_zone}",
+        "",
+        "Subject Info",
+        "Device Location Code:left wrist",
+        "Subject Notes:" + "\x00" * 10,
+        "",
+        "Calibration Data",
+        f"x gain:{gains[0]}",
+        f"x offset:{offsets[0]}",
+        f"y gain:{gains[1]}",
+        f"y offset:{offsets[1]}",
+        f"z gain:{gains[2]}",
+        f"z offset:{offsets[2]}",
+        "Volts:300",
+        "Lux:800",
+        "",
+        "Memory Status",
+        f"Number of Pages:{n_pages}",
+        "",
+    ]
+    raw = np.column_stack([
+        np.round((xyz_g[:, axis] * gains[axis] + offsets[axis]) / 100.0) for axis in range(3)
+    ]).astype(np.int64)
+    light = np.arange(xyz_g.shape[0]) % 1024
+    button = (np.arange(xyz_g.shape[0]) // 300) % 2
+    lines = list(header)
+    for p in range(n_pages):
+        page_time = start_local + timedelta(seconds=p * 300 / rate)
+        rows = raw[p * 300:(p + 1) * 300] & 0xFFF
+        tail = (light[p * 300:(p + 1) * 300] << 2) | (button[p * 300:(p + 1) * 300] << 1)
+        hexline = "".join(
+            f"{x:03X}{y:03X}{z:03X}{t:03X}" for (x, y, z), t in zip(rows, tail)
+        )
+        if truncate_last_page and p == n_pages - 1:
+            hexline = hexline[:1000]
+        lines += [
+            "Recorded Data",
+            "Device Unique Serial Code:045678",
+            f"Sequence Number:{p}",
+            f"Page Time:{page_time:%Y-%m-%d %H:%M:%S}:{page_time.microsecond // 1000:03d}",
+            "Unassigned:",
+            "Temperature:24.5",
+            "Battery voltage:4.1",
+            "Device Status:Recording",
+            f"Measurement Frequency:{rate:g}",
+            hexline,
+        ]
+    path.write_bytes("\r\n".join(lines).encode("latin-1"))
+
+
 # ---------------------------------------------------------------------------
 # Session manifest
 # ---------------------------------------------------------------------------

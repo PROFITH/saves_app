@@ -183,6 +183,39 @@
               "live",
               "offline"
             ]
+          },
+          "type": {
+            "type": "string",
+            "description": "Device type: ax3, ax6, actigraph_gt3x, geneactiv, matrix, sens, senswear, polar_h10, verity_sense, camera, other."
+          },
+          "dominance": {
+            "enum": [
+              "dominant",
+              "non_dominant"
+            ]
+          },
+          "side": {
+            "enum": [
+              "left",
+              "right"
+            ]
+          },
+          "placement_label": {
+            "type": "string"
+          },
+          "serial": {
+            "type": "string"
+          },
+          "sampling_rate_hz": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "range_g": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "free_living": {
+            "type": "boolean"
           }
         }
       }

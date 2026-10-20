@@ -13,7 +13,9 @@ The project has two layers:
 | Format | Devices | Reader |
 |---|---|---|
 | `.cwa` | Axivity AX3, AX6 (accelerometer and gyroscope) | `readers/cwa.py` |
-| `.bin` | Parmay Matrix | `readers/matrix.py` |
+| `.gt3x` | ActiGraph GT3X+, wGT3X-BT, GT9X Link (`log.bin` and older `activity.bin` layouts; idle-sleep gaps filled with the last sample and flagged in `imputed`) | `readers/gt3x.py` |
+| `.bin` | GENEActiv (calibrated with the gains and offsets of the file header; also light, button and temperature) | `readers/geneactiv.py` |
+| `.bin` | Parmay Matrix (told apart from GENEActiv by the file content) | `readers/matrix.py` |
 | `.csv` | SENS motion | `readers/sens.py` |
 | `.csv` | Polar H10 / Verity Sense acceleration exported by lab_protocol_timer | `readers/polar.py` |
 
@@ -53,7 +55,7 @@ python main.py --demo     # synthetic session with four sensors and a video
 
 Workflow:
 
-1. **Drop the session folder** (or use *Abrir sesión*). Studio finds `session_manifest.json`, the videos, `video_sync_session_*.csv` and every sensor file (`.cwa`, Matrix `.bin`, SENS `.csv`, Polar ACC `.csv`) in the folder and its direct subfolders, and guesses each sensor's location from the file name. Files kept elsewhere can be dropped on the window or added with *Añadir archivos*.
+1. **Drop the session folder** (or use *Abrir sesión*). Studio finds `session_manifest.json`, the videos, `video_sync_session_*.csv` and every sensor file (`.cwa`, `.gt3x`, GENEActiv or Matrix `.bin`, SENS `.csv`, Polar ACC `.csv`) in the folder and its direct subfolders. Each file takes its sensor ID and location from the manifest when the manifest lists it (matched by serial number or by the sensor ID in the file name); otherwise the location is guessed from the file name. Files kept elsewhere can be dropped on the window or added with *Añadir archivos*.
 2. Sensors load in the background. Each file is decoded once and cached in `.saves_cache/` next to it, together with a min/max pyramid so hours of data scroll smoothly.
 3. Claps are detected in every sync window and each sensor is fitted against the reference (automatic: Polar ACC, else the video claps, else the sensor with most claps). The banner always says the next step, and the quality table shows offset, drift and residual error per sensor.
 4. **Correct**: drag a clap line, right-click to exclude it or to put the clap where you clicked; double-click a row of the *Palmadas* table to jump to it.

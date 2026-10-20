@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
             "Arrastra aquí la <b>carpeta de la sesión</b> que guardó lab_protocol_timer "
             "(manifiesto, vídeo y CSV del Polar) o ábrela con el botón.<br>"
             "Después arrastra los archivos de los sensores: Axivity <b>.cwa</b>, "
-            "Parmay Matrix <b>.bin</b> y SENS <b>.csv</b>."
+            "ActiGraph <b>.gt3x</b>, GENEActiv o Parmay Matrix <b>.bin</b> y SENS <b>.csv</b>."
         )
         text.setWordWrap(True)
         text.setAlignment(Qt.AlignCenter)
@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
     def choose_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self, "Archivos de sensores o vídeo", self.project.folder if self.project else "",
-            "Sesión (*.cwa *.bin *.csv *.json *.mp4 *.mov *.avi *.mkv);;Todos (*.*)",
+            "Sesión (*.cwa *.gt3x *.bin *.csv *.json *.mp4 *.mov *.avi *.mkv);;Todos (*.*)",
         )
         if files:
             self.add_paths([Path(f) for f in files])
@@ -638,6 +638,8 @@ class MainWindow(QMainWindow):
             table.setItem(row, 1, name)
             combo = QComboBox()
             combo.addItems(LOCATIONS)
+            if entry.location not in LOCATIONS:
+                combo.addItem(entry.location)  # From the manifest (e.g. with side).
             combo.setCurrentText(entry.location)
             combo.setFocusPolicy(Qt.NoFocus)
             combo.currentTextChanged.connect(lambda text, sid=entry.sensor_id: self._location_changed(sid, text))
@@ -783,7 +785,7 @@ class MainWindow(QMainWindow):
             return ("<b>Falta el manifiesto de la sesión</b> (session_manifest.json). Arrástralo a la ventana.",
                     "Añadir archivos…", self.choose_files, "error")
         if not self.project.sensors:
-            return ("<b>Añade los sensores:</b> arrastra los archivos .cwa (Axivity), .bin (Parmay Matrix) o .csv (SENS).",
+            return ("<b>Añade los sensores:</b> arrastra los archivos .cwa (Axivity), .gt3x (ActiGraph), .bin (GENEActiv o Parmay Matrix) o .csv (SENS).",
                     "Añadir archivos…", self.choose_files, "info")
         if self.loading:
             return (f"⏳ Cargando {len(self.loading)} archivo(s). La primera vez tarda más; luego se abre desde la caché.",

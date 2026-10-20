@@ -3,13 +3,16 @@ Find the files of a session and guess what each one is.
 
 lab_protocol_timer writes the manifest, the Polar CSVs, the video and a
 ``video_sync_session_*.csv`` with the host time at which each video started.
-Offline sensor files (.cwa, .bin, SENS .csv) are copied next to them, or
-dropped on the window from anywhere.
+Offline sensor files (Axivity .cwa, ActiGraph .gt3x, GENEActiv or Parmay
+Matrix .bin, SENS .csv) are copied next to them, or dropped on the window
+from anywhere. When the manifest lists the sensors (serial, placement),
+that information wins over guesses from the file name.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -21,14 +24,18 @@ import numpy as np
 
 from readers import infer_format
 from readers.cwa import _parse_header
+from readers.geneactiv import read_geneactiv_serial
+from readers.gt3x import read_gt3x_serial
 from studio.project import SensorEntry, VideoEntry
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
-SENSOR_SUFFIXES = (".cwa", ".bin", ".csv")
+SENSOR_SUFFIXES = (".cwa", ".gt3x", ".bin", ".csv")
 SKIP_DIRS = {"saves_sync", "saves_export", ".saves_cache", "__pycache__"}
 
 FORMAT_LABELS = {
     "cwa": "Axivity",
+    "gt3x": "ActiGraph",
+    "geneactiv": "GENEActiv",
     "matrix": "Parmay Matrix",
     "sens": "SENS motion",
     "polar_acc": "Polar (ACC)",
@@ -46,7 +53,14 @@ _LOCATION_HINTS = (
     (("hip", "cadera", "waist"), "Cadera"),
 )
 
-_SENSOR_ID_BY_FORMAT = {"cwa": "ax", "matrix": "matrix", "sens": "sens", "polar_acc": "h10"}
+_SENSOR_ID_BY_FORMAT = {
+    "cwa": "ax",
+    "gt3x": "gt3x",
+    "geneactiv": "geneactiv",
+    "matrix": "matrix",
+    "sens": "sens",
+    "polar_acc": "h10",
+}
 
 
 @dataclass
@@ -75,13 +89,17 @@ def guess_location(file_name: str, sensor_format: str) -> str:
             return location
     if sensor_format == "sens":
         return "Muslo"
-    if sensor_format == "matrix":
+    if sensor_format in ("matrix", "geneactiv"):
         return "Muñeca no dominante"
     return "Otra"
 
 
 def read_serial(path: Path, sensor_format: str) -> str:
     """Read the device serial from the file header when the format has one."""
+    if sensor_format == "gt3x":
+        return read_gt3x_serial(path)
+    if sensor_format == "geneactiv":
+        return read_geneactiv_serial(path)
     if sensor_format != "cwa":
         return ""
     try:
@@ -119,7 +137,7 @@ def sensor_entry_for(path: Path, sensor_format: Optional[str] = None) -> Optiona
         return None
     location = guess_location(path.name, sensor_format)
     base = _SENSOR_ID_BY_FORMAT[sensor_format]
-    if sensor_format == "cwa":
+    if sensor_format in ("cwa", "gt3x", "geneactiv"):
         short = {
             "Muñeca no dominante": "wrist_nd",
             "Muñeca dominante": "wrist_d",
@@ -127,7 +145,7 @@ def sensor_entry_for(path: Path, sensor_format: Optional[str] = None) -> Optiona
             "Calzado": "shoe",
             "Cadera": "hip",
         }.get(location)
-        base = f"ax_{short}" if short else "ax"
+        base = f"{base}_{short}" if short else base
     return SensorEntry(
         sensor_id=base,
         path=str(path),
@@ -181,5 +199,102 @@ def discover(folder: str | Path) -> Discovery:
             elif path.suffix.lower() in SENSOR_SUFFIXES:
                 found.ignored.append(str(path))
 
+    if found.manifest_path:
+        apply_manifest_sensors(found.sensors, found.manifest_path)
+
     found.videos = [VideoEntry(path=str(v), recording_start_unix_s=video_starts.get(v.name)) for v in videos]
     return found
+
+
+_PLACEMENT_LABELS = {
+    "wrist": "Muñeca",
+    "wrist_non_dominant": "Muñeca no dominante",
+    "wrist_dominant": "Muñeca dominante",
+    "thigh": "Muslo",
+    "hip": "Cadera",
+    "chest": "Pecho",
+    "upper_arm": "Brazo",
+    "ankle": "Tobillo",
+    "shoe": "Calzado",
+    "shoe_left": "Calzado izquierdo",
+    "shoe_right": "Calzado derecho",
+    "room": "Sala",
+}
+_DOMINANCE_LABELS = {"dominant": "dominante", "non_dominant": "no dominante"}
+_SIDE_LABELS = {"left": "izquierda", "right": "derecha"}
+
+
+def manifest_location(sensor: dict) -> Optional[str]:  # noqa: UP045
+    """Location label of a manifest sensor (placement, dominance and side)."""
+    label = sensor.get("placement_label")
+    if label:
+        return str(label)
+    placement = sensor.get("placement")
+    if not placement:
+        return None
+    text = _PLACEMENT_LABELS.get(str(placement), str(placement))
+    if sensor.get("dominance") in _DOMINANCE_LABELS:
+        text += f" {_DOMINANCE_LABELS[sensor['dominance']]}"
+    if sensor.get("side") in _SIDE_LABELS:
+        text += f" ({_SIDE_LABELS[sensor['side']]})"
+    return text
+
+
+def _digits(text: str) -> str:
+    return re.sub(r"\D", "", text or "")
+
+
+def apply_manifest_sensors(entries: list[SensorEntry], manifest_path: str | Path) -> None:
+    """
+    Take sensor IDs and locations from the manifest. A file matches a
+    manifest sensor by serial number (same digits) or by the sensor ID
+    appearing in its file name.
+    """
+    try:
+        sensors = json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("sensors") or {}
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(sensors, dict):
+        return
+    used: set[str] = set()
+
+    def assign(entry: SensorEntry, sensor_id: str) -> None:
+        used.add(sensor_id)
+        entry.sensor_id = sensor_id
+        entry.location = manifest_location(sensors[sensor_id]) or entry.location
+
+    # Serial numbers first, so a file name cannot take another file's sensor.
+    pending = []
+    for entry in entries:
+        serial = _digits(entry.serial)
+        match = next(
+            (
+                sensor_id
+                for sensor_id, sensor in sensors.items()
+                if sensor_id not in used
+                and isinstance(sensor, dict)
+                and serial
+                and (manifest_serial := _digits(str(sensor.get("serial") or "")))
+                and (serial.endswith(manifest_serial) or manifest_serial.endswith(serial))
+            ),
+            None,
+        )
+        if match:
+            assign(entry, match)
+        else:
+            pending.append(entry)
+
+    for entry in pending:
+        stem = _normalize(Path(entry.path).stem)
+        match = next(
+            (
+                sensor_id
+                for sensor_id, sensor in sensors.items()
+                if sensor_id not in used
+                and isinstance(sensor, dict)
+                and re.search(rf"(^|[^a-z0-9]){re.escape(sensor_id.lower())}($|[^a-z0-9])", stem)
+            ),
+            None,
+        )
+        if match:
+            assign(entry, match)
