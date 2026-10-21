@@ -553,16 +553,26 @@ def test_main_window_sends_the_finished_counts_to_redcap(clean_demo, monkeypatch
     window.show_event_kind("sit_to_stand")
     window.remove_event_kind()
     assert project.task_keys() == ["sync", "steps"]
+    # Without a token REDCap is not asked for: it is optional.
+    assert window._next_step()[1] == "📤 Exportar"
+    assert "falta enviarlo a REDCap" not in window.tasks_table.item(1, 2).text()
+
+    window.settings.setValue("redcap_token", "A" * 32)
+    window.settings.setValue("redcap_url", "https://redcap.example.org/api/")
+    window.refresh_tasks()
     text, button, _action, _tone = window._next_step()
     assert "Envía a REDCap el conteo de pasos" in text and button == "☁ Enviar a REDCap"
     assert "falta enviarlo a REDCap" in window.tasks_table.item(1, 2).text()
 
-    window.settings.setValue("redcap_token", "A" * 32)
     names = {1: "Sentado en reposo", 2: "Caminar 4,8 km/h", 3: "Correr 8 km/h", 4: "Subir escaleras"}
     existing = {i: {"la_session_id": "demo_session", "la_name": n} for i, n in names.items()}
-    monkeypatch.setattr(redcap, "current_rows", lambda _token, _participant, url=None: existing)
+    urls = []
+    monkeypatch.setattr(redcap, "project_info",
+                        lambda _token, url=None: urls.append(url) or redcap.ProjectInfo("RUN4HEALTH", True))
+    monkeypatch.setattr(redcap, "current_rows", lambda _token, _participant, **_kw: existing)
     sent = []
-    monkeypatch.setattr(redcap, "import_records", lambda token, records, url=None: sent.append((token, records)) or 1)
+    monkeypatch.setattr(redcap, "import_records",
+                        lambda token, records, url=None: urls.append(url) or sent.append((token, records)) or 1)
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *args, **_kw: warnings.append(args))
     seen = {}
@@ -588,9 +598,11 @@ def test_main_window_sends_the_finished_counts_to_redcap(clean_demo, monkeypatch
     answer("Enviar")
     window.send_to_redcap()
     assert "lo contado por T1" in seen["text"] and "Pasos: 4 actividades" in seen["text"]
+    assert "del proyecto «RUN4HEALTH»" in seen["text"] and "(da_0__visita_inici_arm_1)" in seen["text"]
     assert seen["default"] == "Enviar"
     token, records = sent[-1]
     assert token == "A" * 32
+    assert set(urls) == {"https://redcap.example.org/api/"}
     assert {r["redcap_repeat_instance"]: r["la_steps_video"] for r in records} == {"1": "0", "2": "10", "3": "0", "4": "0"}
     assert all(r["record_id"] == "DEMO01" and r["la_steps_video_by"] == "T1" for r in records)
     assert project.tasks["steps"]["redcap_sent_by"] == "T1"
@@ -604,12 +616,26 @@ def test_main_window_sends_the_finished_counts_to_redcap(clean_demo, monkeypatch
     assert list(activities["redcap_instance"]) == [1, 2, 3, 4]
     assert list(activities["steps_video"]) == [0, 10, 0, 0]
 
+    # A project without events: no redcap_event_name, neither asked nor sent.
+    monkeypatch.setattr(redcap, "project_info", lambda _token, url=None: redcap.ProjectInfo("Otro estudio", False))
+    asked = {}
+    monkeypatch.setattr(redcap, "current_rows",
+                        lambda _token, _participant, url=None, longitudinal=True: asked.update(events=longitudinal) or existing)
+    answer("Enviar")
+    window.send_to_redcap()
+    assert asked["events"] is False
+    assert all("redcap_event_name" not in r for r in sent[-1][1])
+    assert "redcap_event_name" not in pd.read_csv(csv_path).columns
+    assert "da_0" not in seen["text"]
+    monkeypatch.setattr(redcap, "project_info", lambda _token, url=None: redcap.ProjectInfo("RUN4HEALTH", True))
+    monkeypatch.setattr(redcap, "current_rows", lambda _token, _participant, **_kw: existing)
+
     # Another technician's counts are replaced only if asked, and Cancel is the default.
     existing[2].update(la_steps_video="11", la_steps_video_by="AB")
     answer("Cancelar")
     window.send_to_redcap()
     assert "otro técnico (pasos de AB)" in seen["text"] and seen["default"] == "Cancelar"
-    assert len(sent) == 1
+    assert len(sent) == 2
 
     # A rejected token is forgotten.
     def refuse(*_args, **_kw):
@@ -620,6 +646,66 @@ def test_main_window_sends_the_finished_counts_to_redcap(clean_demo, monkeypatch
     assert "token guardado se ha borrado" in warnings[-1][2]
     assert not window.settings.value("redcap_token", "")
     window.close()
+
+
+def test_the_redcap_connection_is_optional_and_set_in_studio(tmp_path, monkeypatch):
+    pytest.importorskip("PySide6")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.delenv("REDCAP_TOKEN", raising=False)
+    monkeypatch.delenv("REDCAP_API_URL", raising=False)
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox
+
+    from studio import redcap
+    from studio.ui.redcap_dialog import RedcapSettingsDialog, saved_token, saved_url
+
+    QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    dialog = RedcapSettingsDialog(settings)
+    assert "Ahora no hay token" in dialog.current.text() and dialog.forget_button is None
+    assert dialog.url_edit.text() == redcap.DEFAULT_API_URL
+    save = dialog.buttons.button(QDialogButtonBox.Ok)
+    # Saving without a token is allowed; there is nothing to try.
+    assert save.isEnabled() and not dialog.check_button.isEnabled()
+    dialog.token_edit.setText("abc")
+    assert not save.isEnabled() and "32 letras" in dialog.status.text()
+    dialog.token_edit.setText("B" * 32)
+    dialog.url_edit.setText("redcap.example.org")
+    assert not save.isEnabled() and "dirección web" in dialog.status.text()
+    dialog.url_edit.setText("https://redcap.example.org/api")
+    assert save.isEnabled() and dialog.check_button.isEnabled()
+
+    asked = []
+    monkeypatch.setattr(redcap, "project_info",
+                        lambda token, url=None: asked.append((token, url)) or redcap.ProjectInfo("RUN4HEALTH", True))
+    dialog.check()
+    assert asked == [("B" * 32, "https://redcap.example.org/api/")]
+    assert "Conectado con «RUN4HEALTH» (con eventos)" in dialog.status.text()
+
+    def refuse(*_args, **_kw):
+        raise redcap.TokenRejected("REDCap no acepta el token (respuesta 403)")
+
+    monkeypatch.setattr(redcap, "project_info", refuse)
+    dialog.check()
+    assert "no acepta el token" in dialog.status.text()
+    dialog.save()
+    assert saved_token(settings) == "B" * 32
+    assert saved_url(settings) == "https://redcap.example.org/api/"
+
+    again = RedcapSettingsDialog(settings)
+    assert "••••••••BBBB" in again.current.text() and again.forget_button is not None
+    assert again.token() == "B" * 32, "an empty field keeps the saved token"
+    again.forget()
+    assert again.removed and not saved_token(settings)
+    assert saved_url(settings) == "https://redcap.example.org/api/"
+
+    # Not remembered: only for this send.
+    once = RedcapSettingsDialog(settings, csv_path=tmp_path / redcap.CSV_NAME)
+    assert redcap.CSV_NAME in once.findChildren(type(once.current))[0].text()
+    once.token_edit.setText("C" * 32)
+    once.remember_check.setChecked(False)
+    once.save()
+    assert once.typed_token() == "C" * 32 and not saved_token(settings)
 
 
 def test_technician_dialog_says_what_will_open(tmp_path, monkeypatch):

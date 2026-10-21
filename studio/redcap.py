@@ -56,12 +56,48 @@ class TokenRejected(RedcapError):
     """REDCap does not accept the token: it has to be typed again."""
 
 
-def api_url() -> str:
-    return os.environ.get("REDCAP_API_URL", "").strip() or DEFAULT_API_URL
+def api_url(saved: str = "") -> str:
+    """The API address: the one set in Studio, else ``REDCAP_API_URL``, else UGR's."""
+    return saved.strip() or os.environ.get("REDCAP_API_URL", "").strip() or DEFAULT_API_URL
 
 
 def env_token() -> str:
     return os.environ.get("REDCAP_TOKEN", "").strip()
+
+
+def normalize_url(text: str) -> Optional[str]:  # noqa: UP045
+    """
+    The API address as typed, ending in ``/`` (REDCap redirects ``…/api`` to
+    ``…/api/`` and a redirected POST loses its data); None if it is not a
+    web address. Empty means UGR's.
+    """
+    text = text.strip()
+    if not text:
+        return DEFAULT_API_URL
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return text if text.endswith("/") else text + "/"
+
+
+def masked(token: str) -> str:
+    """The token with only its last four characters."""
+    return "••••" if len(token) <= 4 else "••••••••" + token[-4:]
+
+
+@dataclass
+class ProjectInfo:
+    """What REDCap says of the project of a token."""
+
+    title: str
+    longitudinal: bool
+
+
+def for_project(records: list[dict], longitudinal: bool) -> list[dict]:
+    """The records as the project takes them: a project without events has no ``redcap_event_name``."""
+    if longitudinal:
+        return records
+    return [{k: v for k, v in r.items() if k != "redcap_event_name"} for r in records]
 
 
 # ----------------------------------------------------------------------
@@ -224,10 +260,15 @@ CSV_COLUMNS = ["record_id", "redcap_event_name", "redcap_repeat_instrument", "re
 
 
 def write_import_csv(records: list[dict], path: str | Path) -> Path:
-    """The records as a file for REDCap's Data Import Tool (empty cells change nothing)."""
+    """
+    The records as a file for REDCap's Data Import Tool (empty cells change
+    nothing; without ``redcap_event_name`` for a project without events).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame = pd.DataFrame(records, columns=CSV_COLUMNS).fillna("")
+    with_events = not records or any("redcap_event_name" in r for r in records)
+    columns = [c for c in CSV_COLUMNS if with_events or c != "redcap_event_name"]
+    frame = pd.DataFrame(records, columns=columns).fillna("")
     frame.to_csv(path, index=False)
     return path
 
@@ -266,12 +307,31 @@ def _missing_fields_hint(text: str) -> str:
     return ""
 
 
-def current_rows(token: str, participant: Participant, url: Optional[str] = None) -> dict[int, dict]:  # noqa: UP045
+def project_info(token: str, url: Optional[str] = None) -> ProjectInfo:  # noqa: UP045
+    """The title of the token's project and whether it has events (raises TokenRejected or RedcapError)."""
+    url = url or api_url()
+    text = _post(url, [("token", token), ("content", "project"), ("format", "json"), ("returnFormat", "json")],
+                 timeout=20.0)
+    try:
+        info = json.loads(text)
+    except ValueError as error:
+        raise RedcapError(f"En {url} no responde la API de REDCap (la dirección suele acabar en /api/).") from error
+    if not isinstance(info, dict):
+        raise RedcapError(f"REDCap no devolvió los datos del proyecto: {text[:200]}")
+    if info.get("error"):
+        raise RedcapError(f"REDCap: {info['error']}")
+    return ProjectInfo(title=str(info.get("project_title", "") or ""),
+                       longitudinal=str(info.get("is_longitudinal", "0")) == "1")
+
+
+def current_rows(token: str, participant: Participant, url: Optional[str] = None,  # noqa: UP045
+                 longitudinal: bool = True) -> dict[int, dict]:
     """The lab_activity instances REDCap has for the participant's visit: attempt and counts."""
     fields = ["record_id", "la_session_id", "la_name", *[f for pair in COUNT_FIELDS.values() for f in pair]]
+    event = participant.redcap_event_name if longitudinal else ""
     data = [
         ("token", token), ("content", "record"), ("format", "json"), ("type", "flat"),
-        ("records[0]", participant.participant_id), ("events[0]", participant.redcap_event_name),
+        ("records[0]", participant.participant_id), *([("events[0]", event)] if event else []),
         ("returnFormat", "json"),
         *[(f"fields[{i}]", f) for i, f in enumerate(fields)],
     ]

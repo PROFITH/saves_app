@@ -228,6 +228,49 @@ def test_the_api_reads_and_sends_with_the_token(monkeypatch):
     assert calls[-1][1]["overwriteBehavior"] == "normal"
 
 
+def test_the_project_of_the_token_says_whether_records_go_with_their_event(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        body = dict(x.split("=", 1) for x in request.data.decode().split("&"))
+        calls.append(body)
+        if body["content"] == "project":
+            return FakeResponse(json.dumps({"project_title": "Otro estudio", "is_longitudinal": 0}).encode())
+        return FakeResponse(b"[]")
+
+    monkeypatch.setattr(redcap.urllib.request, "urlopen", fake_urlopen)
+    info = redcap.project_info("T" * 32, "https://redcap.example/api/")
+    assert info == redcap.ProjectInfo("Otro estudio", False)
+    redcap.current_rows("T" * 32, PARTICIPANT, longitudinal=False)
+    assert "events%5B0%5D" not in calls[-1]
+    redcap.current_rows("T" * 32, PARTICIPANT)
+    assert calls[-1]["events%5B0%5D"] == PARTICIPANT.redcap_event_name
+
+    records = redcap.for_project(_prepared(**{"2": 300}).records, longitudinal=False)
+    assert "redcap_event_name" not in records[0] and records[0]["la_steps_video"] == "300"
+    assert redcap.for_project(_prepared(**{"2": 300}).records, longitudinal=True)[0]["redcap_event_name"]
+    path = redcap.write_import_csv(records, tmp_path / redcap.CSV_NAME)
+    assert "redcap_event_name" not in pd.read_csv(path, dtype=str).columns
+
+    monkeypatch.setattr(redcap.urllib.request, "urlopen", lambda request, timeout: FakeResponse(b"<html>REDCap</html>"))
+    with pytest.raises(redcap.RedcapError, match="/api/"):
+        redcap.project_info("T" * 32, "https://redcap.example/")
+
+
+def test_addresses_are_checked_and_tokens_masked(monkeypatch):
+    assert redcap.normalize_url("") == redcap.DEFAULT_API_URL
+    assert redcap.normalize_url(" https://redcap.example.org/api ") == "https://redcap.example.org/api/"
+    assert redcap.normalize_url("redcap.example.org") is None
+    assert redcap.normalize_url("ftp://redcap.example.org/api/") is None
+    assert redcap.masked("0123456789ABCDEF0123456789ABCDEF") == "••••••••CDEF"
+    monkeypatch.delenv("REDCAP_API_URL", raising=False)
+    assert redcap.api_url() == redcap.DEFAULT_API_URL
+    assert redcap.api_url("https://otro.example/api/") == "https://otro.example/api/"
+    monkeypatch.setenv("REDCAP_API_URL", "https://env.example/api/")
+    assert redcap.api_url() == "https://env.example/api/"
+    assert redcap.api_url("https://otro.example/api/") == "https://otro.example/api/", "the one set in Studio wins"
+
+
 def test_refusals_of_redcap_say_what_to_do(monkeypatch):
     def refuse(code, message):
         def fake_urlopen(request, timeout):

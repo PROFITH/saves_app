@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -25,7 +24,6 @@ from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -78,7 +76,7 @@ from studio.project import (
 )
 from studio.signals import load_signal
 from studio.ui.plots import SignalStack, event_color, sensor_color
-from studio.ui.redcap_dialog import RedcapTokenDialog
+from studio.ui.redcap_dialog import RedcapSettingsDialog, busy, saved_token, saved_url
 from studio.ui.technician import EventTypeDialog, TechnicianDialog
 from studio.ui.video_panel import VideoPanel
 from studio.ui.workers import start_job
@@ -134,16 +132,6 @@ def _short_time(iso: str) -> str:
         return datetime.fromisoformat(iso).strftime("%d/%m %H:%M")
     except (TypeError, ValueError):
         return ""
-
-
-@contextmanager
-def _busy():
-    """Wait cursor while REDCap answers."""
-    QApplication.setOverrideCursor(Qt.WaitCursor)
-    try:
-        yield
-    finally:
-        QApplication.restoreOverrideCursor()
 
 
 def _location_group(location: str) -> str:
@@ -228,6 +216,11 @@ class MainWindow(QMainWindow):
             "Envía a lab_activity en REDCap los pasos y las veces que se levanta en cada actividad, "
             "de los conteos finalizados y con tu código de técnico"
         )
+        self.act_redcap_settings = QAction("🔑 Conexión con REDCap…", self, triggered=self.redcap_settings)
+        self.act_redcap_settings.setToolTip(
+            "La dirección de la API y tu token de REDCap (opcional: sin token, los conteos solo se guardan "
+            "en los archivos exportados)"
+        )
         self.act_xyz = QAction("Ejes X/Y/Z", self, checkable=True, triggered=self._toggle_xyz)
         self.act_xyz.setToolTip("Ver los tres ejes en lugar del módulo (vector magnitude)")
         for action in (self.act_open, self.act_add):
@@ -275,6 +268,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_export)
         file_menu.addAction(self.act_redcap)
+        file_menu.addAction(self.act_redcap_settings)
         self.menuBar().insertMenu(help_menu.menuAction(), file_menu)
 
     def _build_ui(self) -> None:
@@ -921,8 +915,10 @@ class MainWindow(QMainWindow):
                 if task.get("copied_from"):
                     who += f" (copiada de {task['copied_from']})"
                 if state == FINISHED and key in redcap.COUNT_FIELDS and project.events.get(key):
-                    who += (" · falta enviarlo a REDCap" if redcap.needs_sending(project, key)
-                            else f" · en REDCap {_short_time(task.get('redcap_sent_at', ''))}")
+                    if not redcap.needs_sending(project, key):
+                        who += f" · en REDCap {_short_time(task.get('redcap_sent_at', ''))}"
+                    elif self.redcap_configured():
+                        who += " · falta enviarlo a REDCap"
             table.setItem(row, 2, readonly_item(who))
         table.resizeRowsToContents()
         height = table.horizontalHeader().height() + sum(table.rowHeight(r) for r in range(len(keys))) + 2 * table.frameWidth()
@@ -1224,7 +1220,7 @@ class MainWindow(QMainWindow):
                     "y márcalo como finalizado al terminar; si esta sesión no lo tiene, quítalo con «Quitar».",
                     "Ir al conteo", lambda k=key: self.show_event_kind(k), "info")
         unsent = [k for k in redcap.countable_kinds(self.project) if redcap.needs_sending(self.project, k)]
-        if unsent:
+        if unsent and self.redcap_configured():
             names = " y ".join(self.project.event_type(k).lower_name for k in unsent)
             return (f"✅ <b>Todas las tareas están finalizadas.</b> Envía a REDCap el conteo de {names} "
                     "y exporta los resultados.", "☁ Enviar a REDCap", self.send_to_redcap, "ok")
@@ -1871,22 +1867,41 @@ class MainWindow(QMainWindow):
         self._run(lambda _p: engine.export(folder, export_aligned), done,
                   lambda e: QMessageBox.warning(self, "Exportar", f"No se pudo exportar:\n{e}"))
 
-    def _redcap_token(self, csv_path: Optional[Path]) -> str:  # noqa: UP045
-        """The technician's REDCap token: from REDCAP_TOKEN, from this computer or asked now."""
-        token = redcap.env_token() or str(self.settings.value("redcap_token", "") or "")
-        if token:
-            return token
-        dialog = RedcapTokenDialog(csv_path or redcap.CSV_NAME, self)
-        if dialog.exec() != QDialog.Accepted:
-            return ""
-        token, remember = dialog.values()
-        if remember:
-            self.settings.setValue("redcap_token", token)
-        return token
+    def redcap_configured(self) -> bool:
+        """A REDCap token is set (in Studio or in REDCAP_TOKEN); REDCap is optional."""
+        return bool(saved_token(self.settings) or redcap.env_token())
 
-    def _redcap_failed(self, error: Exception, csv_path: Optional[Path]) -> None:  # noqa: UP045
+    def redcap_settings(self) -> None:
+        """«Conexión con REDCap»: the API address and the token of this Windows user."""
+        dialog = RedcapSettingsDialog(self.settings, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if dialog.removed:
+            message = "Token de REDCap quitado: los conteos se guardan solo en los archivos exportados."
+        elif self.redcap_configured():
+            message = f"Conexión con REDCap guardada ({saved_url(self.settings)})."
+        else:
+            message = "Sin token de REDCap: los conteos se guardan solo en los archivos exportados."
+        self.statusBar().showMessage(message, 8000)
+        if self.project is not None:
+            self.refresh_tasks()
+            self.refresh_banner()
+
+    def _redcap_token(self, csv_path: Optional[Path]) -> tuple[str, bool]:  # noqa: UP045
+        """The technician's REDCap token (set in Studio, else REDCAP_TOKEN, else asked now) and whether it is the saved one."""
+        token = saved_token(self.settings)
+        if token:
+            return token, True
+        if redcap.env_token():
+            return redcap.env_token(), False
+        dialog = RedcapSettingsDialog(self.settings, csv_path=csv_path or redcap.CSV_NAME, parent=self)
+        if dialog.exec() != QDialog.Accepted or dialog.removed:
+            return "", False
+        return dialog.typed_token(), bool(saved_token(self.settings))
+
+    def _redcap_failed(self, error: Exception, csv_path: Optional[Path], saved: bool = False) -> None:  # noqa: UP045
         extra = ""
-        if isinstance(error, redcap.TokenRejected) and not redcap.env_token():
+        if isinstance(error, redcap.TokenRejected) and saved:
             self.settings.remove("redcap_token")
             extra = "\n\nEl token guardado se ha borrado: la próxima vez se pedirá de nuevo."
         if csv_path is not None:
@@ -1924,16 +1939,26 @@ class MainWindow(QMainWindow):
             csv_path = redcap.write_import_csv(prepared.records, self.export_folder() / redcap.CSV_NAME)
         except OSError:
             csv_path = None
-        token = self._redcap_token(csv_path)
+        token, saved = self._redcap_token(csv_path)
         if not token:
             where = f" Los conteos están en {csv_path}." if csv_path is not None else ""
             self.statusBar().showMessage(f"No se ha enviado nada a REDCap.{where}", 10000)
             return
+        url = saved_url(self.settings)
         try:
-            with _busy():
-                existing = redcap.current_rows(token, participant)
+            with busy():
+                info = redcap.project_info(token, url)
+                if not info.longitudinal:
+                    # A project without events: the visit only named the folder.
+                    prepared.records = redcap.for_project(prepared.records, longitudinal=False)
+                    if csv_path is not None:
+                        redcap.write_import_csv(prepared.records, csv_path)
+                existing = redcap.current_rows(token, participant, url=url, longitudinal=info.longitudinal)
         except redcap.RedcapError as error:
-            self._redcap_failed(error, csv_path)
+            self._redcap_failed(error, csv_path, saved)
+            return
+        except OSError as error:
+            self._redcap_failed(redcap.RedcapError(str(error)), csv_path, saved)
             return
         problems = redcap.check_instances(prepared, existing)
         if problems:
@@ -1945,8 +1970,10 @@ class MainWindow(QMainWindow):
         for key in prepared.kinds:
             n = prepared.sent_counts.get(key, 0)
             lines.append(f"• {self.project.event_type(key).name}: {n} actividad{'es' if n != 1 else ''}")
-        text = (f"Se enviará a lab_activity en REDCap, registro {participant.participant_id} "
-                f"({participant.redcap_event_name}), lo contado por {prepared.technician}:\n" + "\n".join(lines))
+        visit = f" ({participant.redcap_event_name})" if info.longitudinal else ""
+        project_name = f" del proyecto «{info.title}»" if info.title else ""
+        text = (f"Se enviará a lab_activity{project_name} en REDCap, registro {participant.participant_id}"
+                f"{visit}, lo contado por {prepared.technician}:\n" + "\n".join(lines))
         if left_out:
             text += f"\n\nNo se envían:{left_out}"
         box = QMessageBox(self)
@@ -1964,10 +1991,10 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is not send_button:
             return
         try:
-            with _busy():
-                redcap.import_records(token, prepared.records)
+            with busy():
+                redcap.import_records(token, prepared.records, url=url)
         except redcap.RedcapError as error:
-            self._redcap_failed(error, csv_path)
+            self._redcap_failed(error, csv_path, saved)
             return
         redcap.mark_sent(self.project, prepared.kinds)
         self._save()
