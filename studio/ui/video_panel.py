@@ -31,6 +31,7 @@ def format_seconds(seconds: float) -> str:
 class VideoPanel(QWidget):
     frame_changed = Signal(float)   # video seconds of the frame on screen
     mark_requested = Signal()
+    step_requested = Signal(str)    # foot: "", "L" or "R"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,19 +84,39 @@ class VideoPanel(QWidget):
         controls.addWidget(self.speed_box)
         layout.addLayout(controls)
 
-        self.mark_button = QPushButton("Marcar palmada en el vídeo  [M]")
+        self.mark_button = QPushButton("Marcar palmada o salto en el vídeo  [M]")
         self.mark_button.setStyleSheet("QPushButton{padding:8px; font-weight:bold; background:#1565c0; color:white; border-radius:4px;} QPushButton:disabled{background:#90a4ae;}")
         self.mark_button.setFocusPolicy(Qt.NoFocus)
         self.mark_button.clicked.connect(self.mark_requested.emit)
         layout.addWidget(self.mark_button)
 
         self.hint = QLabel(
-            "Elige una palmada en la tabla (N / P), avanza fotograma a fotograma (← →) "
-            "hasta el primer fotograma del impacto y pulsa M."
+            "Elige un evento en la tabla (N / P), avanza fotograma a fotograma (← →) "
+            "hasta el primer fotograma del impacto (palmada o aterrizaje del salto) y pulsa M."
         )
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color:#555;")
         layout.addWidget(self.hint)
+
+        steps = QHBoxLayout()
+        self.step_buttons = {}
+        for foot, text, tip in (
+            ("L", "👣 Izq. [A]", "Paso del pie izquierdo en el fotograma actual (A)"),
+            ("", "👣 Paso [S]", "Paso en el fotograma actual (S)"),
+            ("R", "👣 Der. [D]", "Paso del pie derecho en el fotograma actual (D)"),
+        ):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setStyleSheet("QPushButton{padding:6px; font-weight:bold; background:#6a1b9a; color:white; border-radius:4px;} QPushButton:disabled{background:#b0a2b8;}")
+            button.clicked.connect(lambda _=False, f=foot: self.step_requested.emit(f))
+            steps.addWidget(button)
+            self.step_buttons[foot] = button
+        layout.addLayout(steps)
+        self.steps_label = QLabel("")
+        self.steps_label.setWordWrap(True)
+        self.steps_label.setStyleSheet("color:#4a148c;")
+        layout.addWidget(self.steps_label)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -110,6 +131,8 @@ class VideoPanel(QWidget):
         self.slider.setEnabled(enabled)
         self.speed_box.setEnabled(enabled)
         self.mark_button.setEnabled(enabled)
+        for button in self.step_buttons.values():
+            button.setEnabled(enabled)
 
     def open(self, path: str) -> None:
         self.close_video()
@@ -134,6 +157,9 @@ class VideoPanel(QWidget):
 
     def set_host_text(self, text: str) -> None:
         self.host_label.setText(text)
+
+    def set_steps_text(self, text: str) -> None:
+        self.steps_label.setText(text)
 
     # ------------------------------------------------------------------
     # Navigation

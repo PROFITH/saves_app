@@ -120,6 +120,7 @@ class SyncEngine:
         # Polar caught the events.
         self.reference_host_fit: Optional[Affine] = None  # noqa: UP045
         self.video_fit_source = "none"
+        self.video_duration_s: Optional[float] = None  # noqa: UP045
         self.min_prominence = 1.0
         self.pad_seconds = 2.0
 
@@ -431,6 +432,18 @@ class SyncEngine:
     def display_to_video(self, display_s):
         return self.video_fit.inverse(display_s) if self.video_fit is not None else np.asarray(display_s, dtype=float)
 
+    def video_display_range(self) -> Optional[tuple[float, float]]:  # noqa: UP045
+        """Display times of the first and last frame of the (first) video."""
+        if self.video_duration_s is None:
+            if not self.project.videos:
+                return None
+            from studio.video import probe_duration
+
+            self.video_duration_s = probe_duration(self.project.videos[0].path) or 0.0
+        if not self.video_duration_s:
+            return None
+        return float(self.video_to_display(0.0)), float(self.video_to_display(self.video_duration_s))
+
     def display_time_of_anchor(self, event_id: str) -> Optional[float]:  # noqa: UP045
         """Display time of a clap or jump, taken from the reference timeline."""
         ref = self.resolved_reference()
@@ -579,6 +592,12 @@ class SyncEngine:
         qc = {
             "session_id": self.session.session_id,
             "reference": self.resolved_reference(),
+            "reference_label": self.reference_label(),
+            "reference_host_fit": (
+                {"a": self.reference_host_fit.a, "b": self.reference_host_fit.b,
+                 "source_origin": self.reference_host_fit.source_origin}
+                if self.reference_host_fit is not None else None
+            ),
             "video": {
                 "files": [v.path for v in self.project.videos],
                 "mapping_source": self.video_fit_source,
@@ -597,12 +616,26 @@ class SyncEngine:
                     "coverage": r.coverage,
                     "manual_anchors": self.project.manual_anchors.get(sid, {}),
                     "excluded_anchors": self.project.excluded_anchors.get(sid, []),
+                    "coarse_offset": (
+                        {
+                            "offset_ms": self.offset_searches[sid].offset_ms,
+                            "accepted": self.offset_searches[sid].accepted,
+                            "votes": self.offset_searches[sid].votes,
+                            "n_events": self.offset_searches[sid].n_events,
+                            "note": self.offset_searches[sid].note,
+                        }
+                        if sid in self.offset_searches else None
+                    ),
                 }
                 for sid, r in results.items()
             },
         }
         written.append(out / "qc.json")
         written[-1].write_text(json.dumps(qc, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+        from studio.export import export_dataset
+
+        written += export_dataset(self, out)
 
         if export_aligned:
             for sid in results:

@@ -3,8 +3,9 @@ Persistent state of one synchronization project.
 
 A project lives in the session folder as ``saves_project.json``: which
 files belong to the session, where each sensor was worn, the video claps
-marked by hand and the manual corrections of sensor claps. Reopening the
-folder restores the work exactly where it was left.
+marked by hand, the manual corrections of sensor claps and the steps
+counted on the video. Reopening the folder restores the work exactly where
+it was left.
 """
 
 from __future__ import annotations
@@ -65,6 +66,9 @@ class SyncProject:
     manual_anchors: dict[str, dict[str, float]] = field(default_factory=dict)
     # sensor_id -> event_ids whose clap is left out of the fit.
     excluded_anchors: dict[str, list[str]] = field(default_factory=dict)
+    # Steps marked on the video: seconds from the start of the (first) video
+    # and the foot ("L", "R" or "" when not told apart), sorted by time.
+    steps: list[dict] = field(default_factory=list)
     version: int = PROJECT_VERSION
 
     @property
@@ -123,6 +127,31 @@ class SyncProject:
         return event_id in self.excluded_anchors.get(sensor_id, [])
 
     # ------------------------------------------------------------------
+    # Steps counted on the video
+    # ------------------------------------------------------------------
+
+    def add_step(self, video_s: float, foot: str = "") -> dict:
+        """Mark a step; a second mark on the same frame replaces the first."""
+        step = {"video_s": round(float(video_s), 4), "foot": foot}
+        self.steps = [s for s in self.steps if abs(s["video_s"] - step["video_s"]) > 1e-3]
+        self.steps.append(step)
+        self.steps.sort(key=lambda s: s["video_s"])
+        return step
+
+    def remove_step_near(self, video_s: float, within_s: float = 0.5) -> Optional[dict]:  # noqa: UP045
+        """Remove the step closest to ``video_s`` if it is near enough."""
+        if not self.steps:
+            return None
+        nearest = min(self.steps, key=lambda s: abs(s["video_s"] - video_s))
+        if abs(nearest["video_s"] - video_s) > within_s:
+            return None
+        self.steps.remove(nearest)
+        return nearest
+
+    def step_times(self) -> list[float]:
+        return [s["video_s"] for s in self.steps]
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 
@@ -160,6 +189,14 @@ class SyncProject:
                 for sid, events in data.get("manual_anchors", {}).items()
             },
             excluded_anchors={sid: list(e) for sid, e in data.get("excluded_anchors", {}).items()},
+            steps=sorted(
+                (
+                    {"video_s": float(s["video_s"]), "foot": str(s.get("foot", ""))}
+                    for s in data.get("steps", [])
+                    if "video_s" in s
+                ),
+                key=lambda s: s["video_s"],
+            ),
         )
         return project
 

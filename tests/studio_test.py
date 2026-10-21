@@ -200,3 +200,142 @@ def test_main_window_opens_the_demo(demo, monkeypatch):
     assert len(window.engine.signals) == 4
     assert window.engine.resolved_reference() == "h10"
     window.close()
+
+
+def test_audio_claps_ignore_the_beeps_of_the_countdown(tmp_path):
+    av = pytest.importorskip("av")
+    from studio.video import detect_audio_claps
+
+    rate = 16000
+    duration = 30.0
+    t = np.arange(int(duration * rate)) / rate
+    rng = np.random.default_rng(3)
+    audio = rng.normal(0, 0.004, t.size)
+    cues = [8.0, 20.0]
+    claps = [cue + 0.42 for cue in cues]
+    for cue in cues:
+        # Loud beeps: 3-2-1 (880 Hz, 0.16 s) and the go (1320 Hz, 0.15 s).
+        for k, (start, length, freq) in enumerate([(cue - 3, 0.16, 880), (cue - 2, 0.16, 880),
+                                                    (cue - 1, 0.16, 880), (cue, 0.15, 1320)]):
+            mask = (t >= start) & (t < start + length)
+            audio[mask] += 0.9 * np.sin(2 * np.pi * freq * (t[mask] - start))
+    for clap in claps:
+        mask = (t >= clap) & (t < clap + 0.04)
+        audio[mask] += 0.5 * np.exp(-(t[mask] - clap) * 120) * rng.choice([-1, 1], mask.sum())
+    path = tmp_path / "beeps.m4a"
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("aac", rate=rate)
+        stream.layout = "mono"
+        samples = audio.astype(np.float32)
+        for start in range(0, samples.size, 1024):
+            frame = av.AudioFrame.from_ndarray(samples[start:start + 1024].reshape(1, -1), format="flt", layout="mono")
+            frame.sample_rate = rate
+            frame.pts = start
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+
+    windows = {f"sync_{i + 1}": (cue - 3.5, cue + 3.5) for i, cue in enumerate(cues)}
+    expected = {f"sync_{i + 1}": cue + 0.35 for i, cue in enumerate(cues)}
+    found = detect_audio_claps(path, windows, expected_video_s=expected)
+    assert set(found) == set(windows)
+    for i, clap in enumerate(claps):
+        assert found[f"sync_{i + 1}"] == pytest.approx(clap, abs=0.02)
+
+
+def test_audio_finds_a_video_whose_start_was_not_logged():
+    from studio.video import match_sounds, sharp_sounds
+
+    # A phone video started 95 s before the session, with steps between the
+    # still phases and the countdown beeps before every clap or landing.
+    rate = 4000
+    lead = 95.0
+    cues = [30.0, 95.0, 170.0, 240.0, 330.0, 400.0]
+    duration = 450.0 + lead
+    t = np.arange(int(duration * rate)) / rate
+    rng = np.random.default_rng(11)
+    audio = rng.normal(0, 0.003, t.size)
+
+    def click(at, gain, decay=150.0):
+        mask = (t >= at) & (t < at + 0.04)
+        audio[mask] += gain * np.exp(-(t[mask] - at) * decay) * rng.choice([-1, 1], mask.sum())
+
+    for cue in cues:
+        v = cue + lead
+        for start, length, freq in [(v - 3, 0.16, 880), (v - 2, 0.16, 880), (v - 1, 0.16, 880), (v, 0.15, 1320)]:
+            mask = (t >= start) & (t < start + length)
+            audio[mask] += 0.9 * np.sin(2 * np.pi * freq * (t[mask] - start))
+    events = [cue + lead + rng.uniform(0.3, 0.5) for cue in cues]
+    for at in events:
+        click(at, 0.6)
+    # Steps every half second between the cues (louder than the claps).
+    for a, b in zip(cues[:-1], cues[1:]):
+        for step in np.arange(a + lead + 8.0, b + lead - 8.0, 0.5):
+            click(step + rng.uniform(-0.03, 0.03), 0.8)
+
+    sounds = sharp_sounds(audio.astype(np.float32), 0.0, rate)
+    windows = {f"sync_{i + 1}": (cue - 1.0, cue + 3.5) for i, cue in enumerate(cues)}
+    expected = {f"sync_{i + 1}": cue + 0.35 for i, cue in enumerate(cues)}
+
+    match = match_sounds(sounds, windows, expected, search_s=3600.0)
+    assert match.searched
+    assert match.shift_s == pytest.approx(lead, abs=0.3)
+    assert set(match.found) == set(windows)
+    for i, at in enumerate(events):
+        assert match.found[f"sync_{i + 1}"] == pytest.approx(at, abs=0.005)
+
+
+def test_two_events_never_share_one_sound():
+    from studio.video import SharpSounds, match_sounds
+
+    sounds = SharpSounds(np.array([10.0, 12.6]), np.array([1.0, 0.9]), np.array([True, True]))
+    windows = {"sync_1": (8.0, 12.0), "sync_2": (9.5, 13.5)}
+    found = match_sounds(sounds, windows, {"sync_1": 10.1, "sync_2": 10.4}).found
+    assert found == {"sync_1": 10.0, "sync_2": 12.6}
+
+
+def test_main_window_counts_steps_on_the_video(demo, monkeypatch, tmp_path):
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pyqtgraph")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QThreadPool
+    from PySide6.QtWidgets import QApplication
+
+    from studio.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.open_folder(demo)
+    for _ in range(300):
+        app.processEvents()
+        if QThreadPool.globalInstance().waitForDone(50) and window.engine is not None \
+                and len(window.engine.signals) == 4 and window.project.video_events:
+            break
+    app.processEvents()
+    # The audio of the video placed the claps on its own.
+    assert len(window.project.video_events) == 6
+    assert window.engine.video_fit_source == "claps"
+
+    window.project.steps = []
+    activity = window.engine.session.activities[1]
+    start_video = float(window.engine.display_to_video(activity.start_time.timestamp()))
+    for k in range(10):
+        window.video.seek(start_video + 2.0 + 0.5 * k)
+        window.mark_step("L" if k % 2 == 0 else "R")
+    assert len(window.project.steps) == 10
+    assert window._step_counts[activity.activity_index] == (10, 10)
+    window.video.seek(start_video + 2.0 + 0.5 * 9 + 0.1)
+    window.remove_step()
+    assert len(window.project.steps) == 9
+    window.undo_step()
+    assert len(window.project.steps) == 10
+    assert window.steps_table.item(1, 1).text() == "10"
+    assert "Pasos (10)" in window.tabs.tabText(1)
+
+    written = {p.relative_to(tmp_path).as_posix() for p in window.engine.export(tmp_path)}
+    assert {"steps.csv", "steps_per_activity.csv"} <= written
+    window.project.steps = []
+    window.project.video_events = {}
+    window.close()
+    (demo / "saves_project.json").unlink(missing_ok=True)

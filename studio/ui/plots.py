@@ -50,6 +50,8 @@ class SignalStack(QWidget):
         self.markers: dict[str, list] = {}
         self.cursors: dict[str, pg.InfiniteLine] = {}
         self.static_items: dict[str, list] = {}
+        self.step_ticks: dict[str, pg.VTickGroup] = {}
+        self._steps: list[float] = []
         self._updating_region = False
 
         layout = QVBoxLayout(self)
@@ -95,6 +97,7 @@ class SignalStack(QWidget):
     def rebuild(self) -> None:
         self.canvas.clear()
         self.plots, self.curves, self.markers, self.cursors, self.static_items = {}, {}, {}, {}, {}
+        self.step_ticks = {}
         if self.engine is None:
             return
         first = None
@@ -128,6 +131,10 @@ class SignalStack(QWidget):
             cursor.setZValue(20)
             plot.addItem(cursor, ignoreBounds=True)
             self.cursors[sid] = cursor
+            ticks = pg.VTickGroup(self._steps, yrange=[0.86, 1.0], pen=pg.mkPen("#6a1b9a", width=2))
+            ticks.setZValue(18)
+            plot.addItem(ticks, ignoreBounds=True)
+            self.step_ticks[sid] = ticks
             if self.show_xyz:
                 self.curves[sid] = [plot.plot(pen=pg.mkPen(AXIS_COLORS[c], width=1)) for c in ("x", "y", "z")]
             else:
@@ -256,6 +263,12 @@ class SignalStack(QWidget):
                 items.append(line)
             self.markers[sid] = items
 
+    def set_steps(self, display_times: list[float]) -> None:
+        """Steps counted on the video, as short purple ticks at the top."""
+        self._steps = list(display_times)
+        for ticks in self.step_ticks.values():
+            ticks.setXVals(self._steps)
+
     def set_xyz(self, enabled: bool) -> None:
         self.show_xyz = enabled
         view = self.view_range()
@@ -334,7 +347,8 @@ class SignalStack(QWidget):
         eid = window.event_id
         state = self.engine.anchor_state(sid, eid)
         menu = QMenu(self)
-        menu.addAction(f"Poner aquí la palmada {eid} de {sid}", lambda: self.add_anchor.emit(sid, eid, x))
+        kind = "el salto" if window.sync_kind == "jump" else "la palmada"
+        menu.addAction(f"Poner aquí {kind} {eid} de {sid}", lambda: self.add_anchor.emit(sid, eid, x))
         if state in ("auto", "manual"):
             menu.addAction(f"Excluir {eid} del ajuste de {sid}", lambda: self.anchor_action.emit(sid, eid, "exclude"))
         if state == "excluded":

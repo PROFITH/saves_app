@@ -2,9 +2,10 @@
 Main window of SAVES Studio.
 
 The work follows the order of the task: open the session folder (or drop
-files on the window), let the claps be detected in every sensor, mark the
-claps in the video (or detect them in the audio), fix the claps flagged in
-red, and export. A banner always says what the next step is.
+files on the window), let the claps and jumps be detected in every sensor
+(each clock's offset is found first), let the audio of the video place the
+video, fix the events flagged in red, count the steps on the video if
+needed, and export. A banner always says what the next step is.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+import pandas as pd
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -42,12 +46,13 @@ from PySide6.QtWidgets import (
 from importers.manifest_importer import ManifestImporter
 from studio.discovery import FORMAT_LABELS, VIDEO_SUFFIXES, classify_file, discover, sensor_entry_for
 from studio.engine import FAIR_RMSE_MS, GOOD_RMSE_MS, VIDEO, SyncEngine, analyze_signal
+from studio.export import label_times, read_phases
 from studio.project import LOCATIONS, SyncProject, VideoEntry
 from studio.signals import load_signal
 from studio.ui.plots import SignalStack, sensor_color
 from studio.ui.video_panel import VideoPanel
 from studio.ui.workers import start_job
-from studio.video import detect_audio_claps, has_audio
+from studio.video import find_audio_events, has_audio
 
 QUALITY_COLORS = {
     "reference": "#1565c0",
@@ -89,6 +94,10 @@ def residual_color(value: Optional[float]) -> QColor:  # noqa: UP045
     return QColor("#c62828")
 
 
+def _is_na(value) -> bool:
+    return value is None or value is pd.NA or (isinstance(value, float) and bool(np.isnan(value)))
+
+
 def readonly_item(text: str, color: Optional[QColor] = None, bold: bool = False) -> QTableWidgetItem:  # noqa: UP045
     item = QTableWidgetItem(text)
     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -115,6 +124,9 @@ class MainWindow(QMainWindow):
         self._jobs = set()
         self._plotted: list[str] = []
         self._selected_event: Optional[str] = None  # noqa: UP045
+        self._step_history: list[tuple[str, dict]] = []  # ("add" | "remove", step)
+        self._phases = None
+        self._step_counts: dict[int, tuple[int, int]] = {}  # activity -> (main, all phases)
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -138,7 +150,7 @@ class MainWindow(QMainWindow):
 
         self.act_open = QAction("📂 Abrir sesión…", self, shortcut=QKeySequence.Open, triggered=self.choose_folder)
         self.act_add = QAction("➕ Añadir archivos…", self, shortcut="Ctrl+Shift+O", triggered=self.choose_files)
-        self.act_audio = QAction("🔊 Detectar palmadas en el audio", self, triggered=self.detect_audio)
+        self.act_audio = QAction("🔊 Detectar palmadas y saltos en el audio", self, triggered=self.detect_audio)
         self.act_export = QAction("💾 Exportar", self, shortcut="Ctrl+E", triggered=self.export)
         self.act_xyz = QAction("Ejes X/Y/Z", self, checkable=True, triggered=self._toggle_xyz)
         self.act_xyz.setToolTip("Ver los tres ejes en lugar del módulo (vector magnitude)")
@@ -148,8 +160,9 @@ class MainWindow(QMainWindow):
         bar.addWidget(QLabel(" Referencia: "))
         self.reference_box = QComboBox()
         self.reference_box.setToolTip(
-            "Reloj al que se ajustan los demás. Automática: el Polar (ya está en la hora del ordenador); "
-            "si no hay, el vídeo con 2 o más palmadas marcadas."
+            "Reloj al que se ajustan los demás. Automática: el Polar que más eventos captó (ya está en la hora "
+            "del ordenador, y el otro Polar completa lo que le falte); si no hay, el vídeo con 2 o más eventos "
+            "marcados; si tampoco, el sensor con más eventos, llevado a la hora de los avisos del cronómetro."
         )
         self.reference_box.currentIndexChanged.connect(self._reference_changed)
         bar.addWidget(self.reference_box)
@@ -266,14 +279,15 @@ class MainWindow(QMainWindow):
         quality_box = QGroupBox("Calidad de la sincronización")
         quality_layout = QVBoxLayout(quality_box)
         self.quality_table = QTableWidget(0, 6)
-        self.quality_table.setHorizontalHeaderLabels(["Sensor", "Estado", "Palmadas", "Desfase", "Deriva", "Error"])
+        self.quality_table.setHorizontalHeaderLabels(["Sensor", "Estado", "Eventos", "Desfase", "Deriva", "Error"])
         self.quality_table.verticalHeader().hide()
         self.quality_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.quality_table.setFocusPolicy(Qt.NoFocus)
         self.quality_table.setToolTip(
-            "Desfase: diferencia de reloj con la referencia en la primera palmada.\n"
+            "Eventos: palmadas o saltos encontrados / esperados.\n"
+            "Desfase: diferencia de reloj con la referencia en el primer evento.\n"
             "Deriva: lo que se adelanta o atrasa el reloj (ppm = µs por segundo).\n"
-            "Error: RMSE de las palmadas tras el ajuste (verde ≤ 25 ms, ámbar ≤ 80 ms)."
+            "Error: RMSE de los eventos tras el ajuste (verde ≤ 25 ms, ámbar ≤ 80 ms)."
         )
         self.quality_table.cellDoubleClicked.connect(self._quality_double_clicked)
         quality_layout.addWidget(self.quality_table)
@@ -291,9 +305,13 @@ class MainWindow(QMainWindow):
         self.plots.anchor_action.connect(self._anchor_action)
         self.plots.add_anchor.connect(self._anchor_moved)
         centre.addWidget(self.plots)
-        claps_box = QGroupBox("Palmadas  (doble clic: ir · clic derecho: opciones)")
+        self.tabs = QTabWidget()
+        claps_box = QWidget()
         claps_layout = QVBoxLayout(claps_box)
         claps_layout.setContentsMargins(4, 4, 4, 4)
+        claps_hint = QLabel("Doble clic: ir al evento · clic derecho: opciones")
+        claps_hint.setStyleSheet("color:#555;")
+        claps_layout.addWidget(claps_hint)
         self.claps_table = QTableWidget(0, 0)
         self.claps_table.verticalHeader().hide()
         self.claps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -304,7 +322,9 @@ class MainWindow(QMainWindow):
         self.claps_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.claps_table.customContextMenuRequested.connect(self._clap_menu)
         claps_layout.addWidget(self.claps_table)
-        centre.addWidget(claps_box)
+        self.tabs.addTab(claps_box, "Palmadas y saltos")
+        self.tabs.addTab(self._build_steps_tab(), "👣 Pasos")
+        centre.addWidget(self.tabs)
         centre.setStretchFactor(0, 3)
         centre.setStretchFactor(1, 1)
         main.addWidget(centre)
@@ -313,12 +333,36 @@ class MainWindow(QMainWindow):
         self.video = VideoPanel()
         self.video.frame_changed.connect(self._video_frame)
         self.video.mark_requested.connect(self.mark_video_clap)
+        self.video.step_requested.connect(self.mark_step)
         main.addWidget(self.video)
 
         main.setStretchFactor(0, 0)
         main.setStretchFactor(1, 3)
         main.setStretchFactor(2, 1)
         main.setSizes([420, 720, 380])
+        return page
+
+    def _build_steps_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        hint = QLabel(
+            "Reproduce el vídeo despacio (0,25× o 0,5×) y pulsa <b>S</b> en cada apoyo del pie "
+            "(<b>A</b> izquierdo, <b>D</b> derecho si los distingues). <b>Retroceso</b> borra el paso "
+            "más cercano y <b>Ctrl+Z</b> deshace. Doble clic en una actividad: ir a su inicio."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#555;")
+        layout.addWidget(hint)
+        self.steps_table = QTableWidget(0, 5)
+        self.steps_table.setHorizontalHeaderLabels(["Actividad", "Pasos (actividad)", "Pasos (con fases quietas)", "Cadencia", "Duración"])
+        self.steps_table.verticalHeader().hide()
+        self.steps_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.steps_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.steps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.steps_table.setFocusPolicy(Qt.NoFocus)
+        self.steps_table.cellDoubleClicked.connect(self._steps_row_clicked)
+        layout.addWidget(self.steps_table)
         return page
 
     def _build_shortcuts(self) -> None:
@@ -335,6 +379,11 @@ class MainWindow(QMainWindow):
             "P": lambda: self.select_relative(-1),
             "Delete": self.clear_video_clap,
             "X": lambda: self.act_xyz.trigger(),
+            "S": lambda: self.mark_step(""),
+            "A": lambda: self.mark_step("L"),
+            "D": lambda: self.mark_step("R"),
+            "Backspace": self.remove_step,
+            "Ctrl+Z": self.undo_step,
         }
         for key, slot in bindings.items():
             shortcut = QShortcut(QKeySequence(key), self)
@@ -347,12 +396,14 @@ class MainWindow(QMainWindow):
             "← / →: fotograma anterior / siguiente\n"
             "Mayús + ← / →: 1 s atrás / adelante\n"
             "Ctrl + ← / →: 10 s atrás / adelante\n"
-            "N / P: palmada siguiente / anterior\n"
-            "M: marcar la palmada en el vídeo (fotograma actual)\n"
-            "Supr: borrar la marca del vídeo de la palmada elegida\n"
+            "N / P: evento (palmada o salto) siguiente / anterior\n"
+            "M: marcar el evento en el vídeo (fotograma actual)\n"
+            "Supr: borrar la marca del vídeo del evento elegido\n"
+            "S: paso en el fotograma actual (A: pie izquierdo, D: pie derecho)\n"
+            "Retroceso: borrar el paso más cercano · Ctrl+Z: deshacer el último cambio de pasos\n"
             "X: ver ejes X/Y/Z o el módulo\n"
             "Gráficas: rueda para zoom, arrastrar para desplazarse, clic para llevar el vídeo a ese instante,\n"
-            "arrastrar una línea de palmada para corregirla, clic derecho para más opciones."
+            "arrastrar una línea de evento para corregirla, clic derecho para más opciones."
         ))
 
     # ==================================================================
@@ -399,6 +450,7 @@ class MainWindow(QMainWindow):
             for entry in found.sensors:
                 project.add_sensor(entry)
         self.project = project
+        self._step_history = []
         self.stack.setCurrentIndex(1)
         self._load_manifest()
         self._open_video()
@@ -406,6 +458,9 @@ class MainWindow(QMainWindow):
             self._load_sensor(entry.sensor_id)
         self._schedule_save()
         self.refresh_all()
+        # First try on its own: the claps and landings in the video's sound.
+        if self.engine is not None and self.project.videos and not self.project.video_events:
+            QTimer.singleShot(0, lambda: self.detect_audio(auto=True))
 
     def add_paths(self, paths: list[Path]) -> None:
         if self.project is None:
@@ -443,6 +498,7 @@ class MainWindow(QMainWindow):
     def _close_session(self) -> None:
         self.video.close_video()
         self.project, self.engine = None, None
+        self._phases = None
         self.loading, self.errors = {}, {}
         self._plotted = []
         self.plots.set_engine(None)
@@ -459,6 +515,7 @@ class MainWindow(QMainWindow):
             return
         old = self.engine
         self.engine = SyncEngine(self.project, session)
+        self._phases = None
         if old is not None:
             for sid, signal in old.signals.items():
                 self._analyze_in_background(sid, signal)
@@ -472,6 +529,9 @@ class MainWindow(QMainWindow):
             self.video.open(self.project.videos[0].path)
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"No se pudo abrir el vídeo: {exc}", 8000)
+            return
+        if self.engine is not None and self.video.reader is not None:
+            self.engine.video_duration_s = self.video.reader.duration_s
 
     def _load_sensor(self, sensor_id: str) -> None:
         entry = self.project.sensor(sensor_id)
@@ -581,6 +641,7 @@ class MainWindow(QMainWindow):
         self.refresh_quality()
         self.refresh_claps_table()
         self.refresh_plots()
+        self.refresh_steps()
         self.refresh_video_label()
         self.refresh_banner()
 
@@ -594,8 +655,7 @@ class MainWindow(QMainWindow):
         index = self.reference_box.findData(self.project.reference)
         self.reference_box.setCurrentIndex(max(index, 0))
         if self.engine is not None and self.project.reference == "auto":
-            resolved = self.engine.resolved_reference()
-            self.reference_box.setItemText(0, f"Automática ({resolved or 'ninguna'})")
+            self.reference_box.setItemText(0, f"Automática: {self.engine.reference_label()}")
         self.reference_box.blockSignals(False)
 
     def refresh_session_label(self) -> None:
@@ -604,7 +664,7 @@ class MainWindow(QMainWindow):
             s = self.engine.session
             lines.append(
                 f"<b>{s.session_id}</b> · {clock(s.start_time.timestamp())}–{clock(s.end_time.timestamp())[:-4]}"
-                f" · {len(s.activities)} actividades · {len(s.sync_windows)} palmadas"
+                f" · {len(s.activities)} actividades · {len(s.sync_windows)} palmadas o saltos"
             )
         else:
             lines.append("<span style='color:#c62828'>Falta session_manifest.json: arrástralo a la ventana.</span>")
@@ -699,7 +759,7 @@ class MainWindow(QMainWindow):
             return
         ids = self.engine.active_sensors()
         has_video = bool(self.project.videos)
-        headers = ["Palmada", "Actividad", "Fase"] + (["Vídeo"] if has_video else []) + ids
+        headers = ["Evento", "Tipo", "Actividad", "Fase"] + (["Vídeo"] if has_video else []) + ids
         table.blockSignals(True)
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -711,9 +771,10 @@ class MainWindow(QMainWindow):
         for row, window in enumerate(windows):
             eid = window.event_id
             table.setItem(row, 0, readonly_item(eid, bold=True))
-            table.setItem(row, 1, readonly_item(names.get(window.activity_index) or f"Actividad {window.activity_index}"))
-            table.setItem(row, 2, readonly_item(phase_text.get(window.phase, window.phase)))
-            col = 3
+            table.setItem(row, 1, readonly_item("salto" if window.sync_kind == "jump" else "palmada"))
+            table.setItem(row, 2, readonly_item(names.get(window.activity_index) or f"Actividad {window.activity_index}"))
+            table.setItem(row, 3, readonly_item(phase_text.get(window.phase, window.phase)))
+            col = 4
             if has_video:
                 if eid in self.project.video_events:
                     r = video_res.get(eid)
@@ -788,19 +849,19 @@ class MainWindow(QMainWindow):
             return ("<b>Añade los sensores:</b> arrastra los archivos .cwa (Axivity), .gt3x (ActiGraph), .bin (GENEActiv o Parmay Matrix) o .csv (SENS).",
                     "Añadir archivos…", self.choose_files, "info")
         if self.loading:
-            return (f"⏳ Cargando {len(self.loading)} archivo(s). La primera vez tarda más; luego se abre desde la caché.",
-                    None, None, "info")
+            return (f"⏳ Cargando {len(self.loading)} archivo(s) y buscando palmadas y saltos. La primera vez tarda más; "
+                    "luego se abre desde la caché.", None, None, "info")
         ref = self.engine.resolved_reference()
         if ref is None:
-            return ("<b>No hay referencia.</b> Elige un sensor como referencia arriba o marca al menos 2 palmadas en el vídeo.",
+            return ("<b>No hay referencia.</b> Elige un sensor como referencia arriba o marca al menos 2 palmadas o saltos en el vídeo.",
                     None, None, "warn")
         for sid in self.engine.active_sensors():
             st = self.engine.status(sid)
             if st.quality == "none":
                 missing = next((w.event_id for w in self.engine.session.sync_windows
                                 if self.engine.anchor_state(sid, w.event_id) == "missing"), None)
-                return (f"<b>{sid}</b> no comparte 2 palmadas con la referencia. Revisa sus ventanas: "
-                        "arrastra la línea o haz clic derecho en la señal para poner la palmada a mano.",
+                return (f"<b>{sid}</b> no comparte 2 palmadas o saltos con la referencia. Revisa sus ventanas: "
+                        "arrastra la línea o haz clic derecho en la señal para poner el evento a mano.",
                         "Ir a la primera" if missing else None,
                         (lambda e=missing: self.focus_event(e)) if missing else None, "warn")
         for sid in self.engine.active_sensors():
@@ -808,15 +869,17 @@ class MainWindow(QMainWindow):
             if st.quality == "poor" or (st.quality == "fair" and st.n_pairs >= 3):
                 worst = self.engine.worst_event(sid)
                 r = self.engine.residual_ms(sid, worst)
-                return (f"<b>Revisa {sid}:</b> la palmada {worst} se desvía {r:+.0f} ms. Corrígela arrastrando su línea "
-                        "o exclúyela (clic derecho).", "Ir a la palmada", lambda e=worst: self.focus_event(e), "warn")
+                return (f"<b>Revisa {sid}:</b> el evento {worst} se desvía {r:+.0f} ms. Corrígelo arrastrando su línea "
+                        "o exclúyelo (clic derecho).", "Ir al evento", lambda e=worst: self.focus_event(e), "warn")
         if self.project.videos and ref != VIDEO and self.engine.video_fit_source != "claps":
             pending = next((w.event_id for w in self.engine.session.sync_windows
                             if w.event_id not in self.project.video_events), None)
-            audio = " o pulsa «Detectar palmadas en el audio»" if self.video.reader else ""
-            return (f"<b>Marca las palmadas en el vídeo</b> (al menos 2){audio}. Al marcar una, se pasa sola a la siguiente.",
+            audio = " o pulsa «Detectar palmadas y saltos en el audio»" if self.video.reader else ""
+            return (f"<b>Marca las palmadas o saltos en el vídeo</b> (al menos 2){audio}. Al marcar uno, se pasa solo al siguiente.",
                     "Empezar", lambda e=pending: self.focus_event(e), "info")
-        return ("✅ <b>Todo sincronizado.</b> Revisa la tabla de calidad y exporta los resultados.",
+        steps = f" Llevas {len(self.project.steps)} pasos contados." if self.project.steps else ""
+        return ("✅ <b>Todo sincronizado.</b> Revisa la tabla de calidad y exporta los resultados."
+                f"{steps} Para contar pasos, abre la pestaña «Pasos».",
                 "💾 Exportar", self.export, "ok")
 
     # ==================================================================
@@ -922,7 +985,7 @@ class MainWindow(QMainWindow):
         event_id = self._event_at(index.row())
         header = self.claps_table.horizontalHeaderItem(index.column()).text()
         menu = QMenu(self)
-        menu.addAction("Ir a esta palmada", lambda: self.focus_event(event_id))
+        menu.addAction("Ir a este evento", lambda: self.focus_event(event_id))
         if header == "Vídeo":
             if self.video.current_time is not None:
                 menu.addAction("Marcar en el fotograma actual del vídeo", lambda: (self._select_row(event_id, focus=False), self.mark_video_clap()))
@@ -938,7 +1001,7 @@ class MainWindow(QMainWindow):
                 menu.addAction("Volver a la detección automática", lambda: self._anchor_action(header, event_id, "auto"))
             if self.video.current_time is not None:
                 menu.addAction(
-                    f"Poner la palmada de {header} en el instante del vídeo",
+                    f"Poner el evento de {header} en el instante del vídeo",
                     lambda: self._anchor_moved(header, event_id, float(self.engine.video_to_display(self.video.current_time))),
                 )
         menu.exec(self.claps_table.viewport().mapToGlobal(pos))
@@ -961,6 +1024,7 @@ class MainWindow(QMainWindow):
         display = float(self.engine.video_to_display(video_s))
         self.plots.set_cursor(display, follow=self.video.playing)
         self.video.set_host_text(f"Hora de sesión {clock(display)}  ({VIDEO_SOURCE_TEXT[self.engine.video_fit_source]})")
+        self.video.set_steps_text(self._steps_text(display))
 
     def _plot_clicked(self, display_s: float) -> None:
         if self.engine is not None and self.video.reader is not None:
@@ -1014,42 +1078,193 @@ class MainWindow(QMainWindow):
             self._set_reference(value)
 
     # ==================================================================
+    # Steps counted on the video
+    # ==================================================================
+
+    def _session_phases(self):
+        if self._phases is None and self.engine is not None:
+            self._phases = read_phases(self.project.folder, self.engine.session)
+        return self._phases
+
+    def _activity_names(self) -> dict[int, str]:
+        if self.engine is None:
+            return {}
+        return {a.activity_index: a.activity_name or f"Actividad {a.activity_index}" for a in self.engine.session.activities}
+
+    def mark_step(self, foot: str = "") -> None:
+        """Step at the frame on screen (keys S, A and D)."""
+        if self.project is None or self.video.current_time is None:
+            return
+        step = self.project.add_step(self.video.current_time, foot)
+        self._step_history.append(("add", step))
+        self._steps_changed(f"Paso {len(self.project.steps)} a {step['video_s']:.2f} s" + (f" (pie {'izquierdo' if foot == 'L' else 'derecho'})" if foot else ""))
+
+    def remove_step(self) -> None:
+        if self.project is None or self.video.current_time is None:
+            return
+        removed = self.project.remove_step_near(self.video.current_time)
+        if removed is None:
+            self.statusBar().showMessage("No hay ningún paso a menos de 0,5 s del fotograma actual", 4000)
+            return
+        self._step_history.append(("remove", removed))
+        self._steps_changed(f"Paso de {removed['video_s']:.2f} s borrado")
+
+    def undo_step(self) -> None:
+        if self.project is None or not self._step_history:
+            return
+        action, step = self._step_history.pop()
+        if action == "add":
+            self.project.steps = [s for s in self.project.steps if s is not step and s != step]
+        else:
+            self.project.add_step(step["video_s"], step.get("foot", ""))
+        self._steps_changed("Deshecho")
+
+    def _steps_changed(self, message: str) -> None:
+        self.statusBar().showMessage(message, 3000)
+        self._schedule_save()
+        self.refresh_steps()
+
+    def refresh_steps(self) -> None:
+        if self.project is None:
+            return
+        steps = self.project.step_times()
+        if self.engine is None:
+            self.plots.set_steps([])
+            return
+        display = [float(t) for t in np.atleast_1d(self.engine.video_to_display(steps))] if steps else []
+        self.plots.set_steps(display)
+        phases = self._session_phases()
+        names = self._activity_names()
+        self._step_counts = {}
+        if display:
+            labels = label_times(np.asarray(display, dtype=float), phases, names)
+            for act, phase in zip(labels["activity_index"], labels["phase"]):
+                if _is_na(act):
+                    continue
+                main, total = self._step_counts.get(int(act), (0, 0))
+                self._step_counts[int(act)] = (main + (phase == "activity_main"), total + 1)
+        table = self.steps_table
+        activities = self.engine.session.activities
+        table.setRowCount(len(activities))
+        for row, activity in enumerate(activities):
+            index = activity.activity_index
+            main_phases = phases[(phases["activity_index"] == index) & (phases["phase"] == "activity_main")] if phases is not None else []
+            main_s = float((main_phases["end_s"] - main_phases["start_s"]).sum()) if len(main_phases) else activity.duration_seconds
+            n_main, n_all = self._step_counts.get(index, (0, 0))
+            cadence = f"{60.0 * n_main / main_s:.0f} pasos/min" if main_s > 0 and n_main else ""
+            item = readonly_item(names.get(index, ""), bold=bool(n_all))
+            item.setData(Qt.UserRole, index)
+            table.setItem(row, 0, item)
+            table.setItem(row, 1, readonly_item(str(n_main) if n_all else "", QColor("#4a148c"), bold=True))
+            table.setItem(row, 2, readonly_item(str(n_all) if n_all else ""))
+            table.setItem(row, 3, readonly_item(cadence))
+            table.setItem(row, 4, readonly_item(f"{main_s:.0f} s"))
+        self.tabs.setTabText(1, f"👣 Pasos ({len(steps)})" if steps else "👣 Pasos")
+        self._video_frame(self.video.current_time)
+
+    def _steps_row_clicked(self, row: int, _col: int) -> None:
+        item = self.steps_table.item(row, 0)
+        if item is None or self.engine is None:
+            return
+        index = item.data(Qt.UserRole)
+        activity = next((a for a in self.engine.session.activities if a.activity_index == index), None)
+        if activity is None:
+            return
+        start, end = activity.start_time.timestamp(), activity.end_time.timestamp()
+        self.plots.focus(start - 5.0, min(end, start + 60.0))
+        if self.video.reader is not None:
+            self.video.pause()
+            self.video.seek(float(self.engine.display_to_video(start)))
+
+    def _steps_text(self, display: float) -> str:
+        """Steps so far and those of the activity on screen."""
+        if self.project is None or not self.project.steps or self.engine is None:
+            return "Pasos: ninguno todavía (S en cada apoyo del pie)"
+        phases = self._session_phases()
+        if phases is None or not len(phases):
+            return f"Pasos: {len(self.project.steps)}"
+        here = label_times(np.asarray([display], dtype=float), phases, self._activity_names())
+        index = here["activity_index"][0]
+        if _is_na(index):
+            return f"Pasos: {len(self.project.steps)} en total"
+        main, total = self._step_counts.get(int(index), (0, 0))
+        return (f"Pasos: {len(self.project.steps)} en total · «{here['activity'][0]}»: "
+                f"{main} en la actividad ({total} con las fases quietas)")
+
+    # ==================================================================
     # Audio, export, saving
     # ==================================================================
 
-    def detect_audio(self) -> None:
+    def detect_audio(self, auto: bool = False) -> None:
+        """Find the claps and landings in the sound of the video."""
         if self.engine is None or not self.project.videos:
             return
         path = self.project.videos[0].path
-        if not has_audio(path):
-            QMessageBox.information(self, "El vídeo no tiene sonido", (
-                "Este vídeo se grabó sin audio, así que las palmadas hay que marcarlas a mano.\n\n"
-                "Para las próximas sesiones, activa el audio en lab_protocol_timer (enableAudio) "
-                "y las palmadas se detectarán solas."
-            ))
+        try:
+            sound = has_audio(path)
+        except Exception:  # noqa: BLE001 - unreadable video
+            sound = False
+        if not sound:
+            if not auto:
+                QMessageBox.information(self, "El vídeo no tiene sonido", (
+                    "Este vídeo se grabó sin audio, así que las palmadas y los saltos hay que marcarlos a mano.\n\n"
+                    "Para las próximas sesiones, graba con audio en lab_protocol_timer "
+                    "y se detectarán solos."
+                ))
             return
+        if self.engine.video_fit is None:
+            self.engine.refit()  # the video is placed on the session clock
+        # How far the video may be from where it is placed: little when the
+        # timer logged its start or claps are marked, the whole video when not.
+        if self.engine.video_fit_source in ("claps", "one_clap"):
+            search_s = 3.0
+        elif self.engine.video_fit_source == "recording_start":
+            search_s = 10.0
+        else:
+            search_s = max(float(self.engine.video_duration_s or 0.0), 3600.0)
         margin = 3.0
-        windows = {
-            w.event_id: (
-                float(self.engine.display_to_video(w.window_start.timestamp() - margin)),
-                float(self.engine.display_to_video(w.window_end.timestamp() + margin)),
-            )
-            for w in self.engine.session.sync_windows
-        }
-        self.statusBar().showMessage("Buscando palmadas en el audio…")
+        windows, expected = {}, {}
+        for w in self.engine.session.sync_windows:
+            if w.expected_time is not None:
+                # Around the cue: from just before the go to 3.5 s after it.
+                cue = w.cue_time.timestamp()
+                windows[w.event_id] = (
+                    float(self.engine.display_to_video(cue - 1.0)),
+                    float(self.engine.display_to_video(cue + 3.5)),
+                )
+                expected[w.event_id] = float(self.engine.display_to_video(w.expected_time.timestamp()))
+            else:
+                windows[w.event_id] = (
+                    float(self.engine.display_to_video(w.window_start.timestamp() - margin)),
+                    float(self.engine.display_to_video(w.window_end.timestamp() + margin)),
+                )
+        self.statusBar().showMessage("Buscando palmadas y saltos en el audio del vídeo…")
 
-        def done(found):
+        def done(match):
+            if self.project is None:
+                return
+            found = match.found
             new = {e: t for e, t in found.items() if e not in self.project.video_events}
             self.project.video_events.update(new)
             self._changed()
             kept = len(found) - len(new)
-            msg = f"Audio: {len(found)} palmada(s) encontradas, {len(new)} añadidas"
+            msg = f"Audio: {len(found)} de {len(windows)} palmadas o saltos encontrados, {len(new)} añadidos"
             if kept:
-                msg += f" ({kept} ya estaban marcadas a mano y no se tocan)"
-            self.statusBar().showMessage(msg, 8000)
+                msg += f" ({kept} ya estaban marcados a mano y no se tocan)"
+            if match.searched and abs(match.shift_s) >= 1.0:
+                msg += f"; el vídeo estaba {abs(match.shift_s):.1f} s {'después' if match.shift_s > 0 else 'antes'} de lo previsto"
+            if len(found) < len(windows):
+                msg += ". Revisa los que faltan en la columna «Vídeo»."
+            self.statusBar().showMessage(msg, 15000)
 
-        self._run(lambda _p: detect_audio_claps(path, windows), done,
-                  lambda e: QMessageBox.warning(self, "Audio", f"No se pudo analizar el audio:\n{e}"))
+        def failed(error):
+            if auto:
+                self.statusBar().showMessage(f"No se pudo analizar el audio: {error}", 8000)
+            else:
+                QMessageBox.warning(self, "Audio", f"No se pudo analizar el audio:\n{error}")
+
+        self._run(lambda _p: find_audio_events(path, windows, expected_video_s=expected, search_s=search_s),
+                  done, failed)
 
     def export(self) -> None:
         if self.engine is None or not self.engine.signals:

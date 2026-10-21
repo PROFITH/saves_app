@@ -122,3 +122,62 @@ def test_without_polar_an_offline_sensor_leads_on_the_cue_clock(folder):
         times.append(host)
     assert len(times) >= 4
     assert max(times) - min(times) < 0.04
+
+
+def test_export_labels_every_sample_on_the_host_clock(engine, tmp_path):
+    import pandas as pd
+
+    written = {p.relative_to(tmp_path).as_posix() for p in engine.export(tmp_path)}
+    assert {"phases.csv", "activities.csv", "LEEME.txt", "sync_report.csv", "qc.json"} <= written
+    assert "signals/ax3_wnd.csv.gz" in written
+
+    phases = pd.read_csv(tmp_path / "phases.csv")
+    # Four phases in each of the 9 activities; the protocol ends as the last
+    # transition starts.
+    assert len(phases) == 35
+    assert set(phases["phase"]) == {"static_prep", "activity_main", "static_post", "transition_lap"}
+
+    wrist = pd.read_csv(tmp_path / "signals" / "ax3_wnd.csv.gz")
+    assert list(wrist.columns[:5]) == ["time_unix_ms", "time_native_unix_ms", "x", "y", "z"]
+    # The device clock is two hours off; the export is on the host clock.
+    assert (wrist["time_native_unix_ms"] - wrist["time_unix_ms"]).median() == pytest.approx(-7_199_400, abs=200)
+    jog = wrist[(wrist["activity"] == "Trotar a ritmo propio") & (wrist["phase"] == "activity_main")]
+    duration = (jog["time_unix_ms"].max() - jog["time_unix_ms"].min()) / 1000
+    assert duration == pytest.approx(240, abs=0.5)
+    session = engine.session
+    first = wrist["time_unix_ms"].min() / 1000
+    assert first == pytest.approx(session.start_time.timestamp() - 60, abs=1)
+
+    activities = pd.read_csv(tmp_path / "activities.csv")
+    assert len(activities) == 9
+    assert {"met", "rpe", "completion", "end_reason"} <= set(activities.columns)
+
+
+def test_steps_marked_on_the_video_are_counted_per_activity(engine, tmp_path):
+    from studio.export import read_phases, step_table, steps_per_activity
+
+    session = engine.session
+    jog = next(a for a in session.activities if a.activity_name == "Trotar a ritmo propio")
+    # A video that starts with the session, on the host clock.
+    engine.video_fit = None
+    origin = session.start_time.timestamp()
+    from studio.engine import Affine
+
+    engine.video_fit = Affine(a=origin, b=1.0)
+    engine.video_duration_s = session.duration_seconds
+    start = jog.start_time.timestamp() - origin
+    engine.project.steps = []
+    for k in range(60):
+        engine.project.add_step(start + 1.0 + k * 0.37, "L" if k % 2 == 0 else "R")
+    engine.project.add_step(start - 5.0)  # in the static phase before
+
+    names = {a.activity_index: a.activity_name for a in session.activities}
+    phases = read_phases(engine.project.folder, session)
+    steps = step_table(engine, phases, names)
+    assert len(steps) == 61
+    per = steps_per_activity(engine, steps, phases, names).set_index("activity_index")
+    assert per.loc[jog.activity_index, "steps_main"] == 60
+    assert per.loc[jog.activity_index, "steps_all_phases"] == 61
+    assert per.loc[jog.activity_index, "cadence_steps_min"] == pytest.approx(15.0, abs=0.1)
+    assert per.loc[jog.activity_index, "video_coverage_pct"] == pytest.approx(100.0)
+    engine.project.steps = []

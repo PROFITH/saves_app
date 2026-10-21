@@ -87,12 +87,31 @@ def estimate_offset(
     range on both sides.
     """
     events = expected_events(session)
+    if len(events) < 2:
+        return OffsetSearch(n_events=len(events), note="Hacen falta 2 eventos de sincronización en el manifiesto")
+    times, _prominences = impulse_candidates(np.asarray(t_ms, dtype=float), np.asarray(vm, dtype=float))
+    if times.size == 0:
+        return OffsetSearch(n_events=len(events), note="No hay impactos claros en la señal")
+    return vote_offset(times, events, max_offset_s)
+
+
+def vote_offset(
+    times: np.ndarray,
+    events: list[tuple[str, float, float]],
+    max_offset_s: float,
+) -> OffsetSearch:
+    """
+    Offset (ms) that puts the most isolated impacts on the expected events.
+
+    ``times`` are the impacts (ms, on the clock being searched) and
+    ``events`` the (event_id, expected time in ms, tolerance in s) of each
+    sync event. Also used for the claps in the sound of a video.
+    """
+    times = np.asarray(times, dtype=float)
     result = OffsetSearch(n_events=len(events))
     if len(events) < 2:
         result.note = "Hacen falta 2 eventos de sincronización en el manifiesto"
         return result
-
-    times, prominences = impulse_candidates(np.asarray(t_ms, dtype=float), np.asarray(vm, dtype=float))
     if times.size == 0:
         result.note = "No hay impactos claros en la señal"
         return result
