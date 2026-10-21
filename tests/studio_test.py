@@ -1,6 +1,7 @@
 """Tests of SAVES Studio's headless core on the demo session (sensors with known clock errors)."""
 
 import json
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -335,6 +336,27 @@ def test_main_window_counts_steps_on_the_video(demo, monkeypatch, tmp_path):
 
     written = {p.relative_to(tmp_path).as_posix() for p in window.engine.export(tmp_path)}
     assert {"steps.csv", "steps_per_activity.csv"} <= written
+
+    # Ctrl+E: one dialog with the session's saves_sync folder; «Exportar» writes there.
+    from PySide6.QtWidgets import QMessageBox
+
+    clicked = {}
+
+    def fake_exec(box):
+        clicked["button"] = next((b for b in box.buttons() if b.text() == "Exportar"), None)
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda box: clicked.get("button"))
+    window.export()
+    for _ in range(200):
+        app.processEvents()
+        if QThreadPool.globalInstance().waitForDone(50) and (demo / "saves_sync" / "LEEME.txt").exists():
+            break
+    app.processEvents()
+    assert (demo / "saves_sync" / "steps.csv").exists()
+    assert not list((demo / "saves_sync").glob("*_aligned.csv.gz"))
+    shutil.rmtree(demo / "saves_sync")
     window.project.steps = []
     window.project.video_events = {}
     window.close()

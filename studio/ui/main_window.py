@@ -1269,24 +1269,24 @@ class MainWindow(QMainWindow):
     def export(self) -> None:
         if self.engine is None or not self.engine.signals:
             return
-        default = str(Path(self.project.folder) / "saves_sync")
-        folder = QFileDialog.getExistingDirectory(self, "Carpeta de resultados", default) or None
-        if folder is None:
-            Path(default).mkdir(exist_ok=True)
-            box = QMessageBox(self)
-            box.setWindowTitle("Exportar")
-            box.setText(f"¿Exportar en {default}?")
-            box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-            aligned = QCheckBox("Incluir las señales alineadas (archivos grandes)")
-            box.setCheckBox(aligned)
-            if box.exec() != QMessageBox.Ok:
+        folder = str(Path(self.project.folder) / "saves_sync")
+        box = QMessageBox(self)
+        box.setWindowTitle("Exportar")
+        box.setText(f"Se exportará la sesión sincronizada y etiquetada en:\n{folder}")
+        aligned = QCheckBox("Incluir también la grabación completa de cada sensor, alineada (archivos grandes)")
+        box.setCheckBox(aligned)
+        export_button = box.addButton("Exportar", QMessageBox.AcceptRole)
+        other_button = box.addButton("Otra carpeta…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(export_button)
+        box.exec()
+        if box.clickedButton() is other_button:
+            folder = QFileDialog.getExistingDirectory(self, "Carpeta de resultados", str(self.project.folder))
+            if not folder:
                 return
-            folder, export_aligned = default, aligned.isChecked()
-        else:
-            export_aligned = QMessageBox.question(
-                self, "Exportar", "¿Incluir también las señales alineadas? (archivos grandes)",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) == QMessageBox.Yes
+        elif box.clickedButton() is not export_button:
+            return
+        export_aligned = aligned.isChecked()
         engine = self.engine
         self.statusBar().showMessage("Exportando…")
 
