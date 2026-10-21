@@ -458,6 +458,10 @@ class MainWindow(QMainWindow):
             self._load_sensor(entry.sensor_id)
         self._schedule_save()
         self.refresh_all()
+        if not project.sensors:
+            self.statusBar().showMessage(
+                "No hay archivos de sensores en la carpeta: cópialos en ella o arrástralos a la ventana."
+            )
         # First try on its own: the claps and landings in the video's sound.
         if self.engine is not None and self.project.videos and not self.project.video_events:
             QTimer.singleShot(0, lambda: self.detect_audio(auto=True))

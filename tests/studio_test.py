@@ -2,6 +2,7 @@
 
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -200,6 +201,26 @@ def test_main_window_opens_the_demo(demo, monkeypatch):
     app.processEvents()
     assert len(window.engine.signals) == 4
     assert window.engine.resolved_reference() == "h10"
+    window.close()
+
+
+def test_main_window_says_when_the_sensor_files_are_missing(demo, monkeypatch, tmp_path):
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pyqtgraph")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from studio.ui.main_window import MainWindow
+
+    # A session folder straight from the lab, before the sensors are copied.
+    shutil.copy(Path(demo) / "session_manifest.json", tmp_path / "session_manifest.json")
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.open_folder(tmp_path)
+    app.processEvents()
+    assert window.engine is not None
+    assert not window.project.sensors
+    assert "No hay archivos de sensores" in window.statusBar().currentMessage()
     window.close()
 
 
