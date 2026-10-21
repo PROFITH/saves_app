@@ -35,7 +35,9 @@ if TYPE_CHECKING:
     from models import Participant
     from studio.engine import SyncEngine
 
-DEFAULT_API_URL = "https://redcap.ugr.es/api/"
+# The UGR's public REDCap; redcap.ugr.es only exists inside the UGR network
+# (or with its VPN).
+DEFAULT_API_URL = "https://minerva.ugr.es/api/"
 INSTRUMENT = "lab_activity"
 # Fields of lab_activity that take each count: the number and who counted.
 COUNT_FIELDS = {
