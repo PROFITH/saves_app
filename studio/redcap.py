@@ -35,8 +35,8 @@ if TYPE_CHECKING:
     from models import Participant
     from studio.engine import SyncEngine
 
-# The UGR's public REDCap; redcap.ugr.es only exists inside the UGR network
-# (or with its VPN).
+# The address the UGR gives for its REDCap. It only accepts connections from
+# the UGR network or its VPN (redcap.ugr.es does not even resolve outside it).
 DEFAULT_API_URL = "https://minerva.ugr.es/api/"
 INSTRUMENT = "lab_activity"
 # Fields of lab_activity that take each count: the number and who counted.
