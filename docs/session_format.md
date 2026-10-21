@@ -18,7 +18,7 @@ A laboratory session is described by one `session_manifest.json` written by the 
 | `session_start_time_utc`, `session_end_time_utc` | yes | Start and end of the session |
 | `protocol` | no | `protocol_id`, `protocol_version` of the activity battery |
 | `participants[]` | no | `participant_id`, `redcap_event_name` |
-| `activities[]` | yes | `activity_index`, `activity_start_time_utc`, `activity_end_time_utc`, `duration_seconds`; optional `activity_name`, `compendium_code`, `planned_duration_seconds` |
+| `activities[]` | yes | `activity_index`, `activity_start_time_utc`, `activity_end_time_utc`, `duration_seconds`; optional `activity_name`, `compendium_code`, `planned_duration_seconds`, `attempt` (1 unless the activity was repeated), `activity_kind` (`calibration` for the static calibration), `redcap_instance` (the `lab_activity` instance of that attempt in REDCap) |
 | `sync_windows[]` | yes | `event_id`, `event_type`, `activity_index`, `phase`, `window_start_time_utc`, `window_end_time_utc` |
 | `video.files[]` | no | Video file names in the session folder |
 | `sensors{}` | no | Keyed by sensor ID: `present`, `timestamp_domain`; optional `device_name`, `connection` (`live` or `offline`), `type`, `placement`, `dominance`, `side`, `placement_label`, `serial`, `sampling_rate_hz`, `range_g`, `free_living` |

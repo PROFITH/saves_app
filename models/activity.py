@@ -18,3 +18,11 @@ class Activity:
     planned_duration_seconds: Optional[float] = None  # noqa: UP045
     met: Optional[float] = None  # noqa: UP045
     rpe: Optional[float] = None  # noqa: UP045
+
+    # Attempt (1, or more when the activity was repeated), the kind of
+    # segment ("activity", or "calibration" for the calibration box) and
+    # the lab_activity instance it was sent to in REDCap by
+    # lab_protocol_timer.
+    attempt: int = 1
+    activity_kind: str = "activity"
+    redcap_instance: Optional[int] = None  # noqa: UP045

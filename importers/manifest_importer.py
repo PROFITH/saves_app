@@ -108,12 +108,22 @@ class ManifestImporter:
             ),
             met=cls._optional_float(data.get("met")),
             rpe=cls._optional_float(data.get("rpe")),
+            attempt=cls._optional_int(data.get("attempt")) or 1,
+            activity_kind=str(data.get("activity_kind") or "activity"),
+            redcap_instance=cls._optional_int(data.get("redcap_instance")),
         )
 
     @staticmethod
     def _optional_float(value):
         try:
             return float(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_int(value):
+        try:
+            return int(value) if value not in (None, "") else None
         except (TypeError, ValueError):
             return None
 

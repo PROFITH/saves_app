@@ -352,7 +352,7 @@ def test_main_window_counts_steps_on_the_video(clean_demo, monkeypatch, tmp_path
         window.mark_event("L" if k % 2 == 0 else "R")
     assert len(window.project.steps) == 10
     assert window.project.steps[0]["side"] == "L"
-    assert window._event_counts[activity.activity_index] == (10, 10)
+    assert window._event_counts[(activity.activity_index, activity.attempt)] == (10, 10)
     window.video.seek(start_video + 2.0 + 0.5 * 9 + 0.1)
     window.remove_event()
     assert len(window.project.steps) == 9
@@ -526,6 +526,99 @@ def test_main_window_checklist_technicians_and_plots(clean_demo, monkeypatch, tm
     assert warnings and "ilegible" in warnings[0][1].lower()
     assert len(list(legacy.glob("saves_project_IJ.json.ilegible-*"))) == 1
     assert window.project.technician == "IJ" and not window.project.events.get("steps")
+    window.close()
+
+
+def test_main_window_sends_the_finished_counts_to_redcap(clean_demo, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+
+    from studio import redcap
+
+    demo = clean_demo
+    monkeypatch.delenv("REDCAP_TOKEN", raising=False)
+    app, window = _window(tmp_path, monkeypatch)
+    window.open_folder(demo, technician="T1")
+    _wait(app, lambda: window.engine is not None and len(window.engine.signals) == 4 and window.project.video_events)
+    project = window.project
+    monkeypatch.setattr(window, "_confirm", lambda *_args: True)
+    window.set_task_state("sync", "finished")
+    window.show_event_kind("steps")
+    activity = window.engine.session.activities[1]
+    start_video = float(window.engine.display_to_video(activity.start_time.timestamp()))
+    for k in range(10):
+        window.video.seek(start_video + 2.0 + 0.5 * k)
+        window.mark_event("L" if k % 2 == 0 else "R")
+    window.set_task_state("steps", "finished")
+    # This session has no chair-stand test.
+    window.show_event_kind("sit_to_stand")
+    window.remove_event_kind()
+    assert project.task_keys() == ["sync", "steps"]
+    text, button, _action, _tone = window._next_step()
+    assert "Envía a REDCap el conteo de pasos" in text and button == "☁ Enviar a REDCap"
+    assert "falta enviarlo a REDCap" in window.tasks_table.item(1, 2).text()
+
+    window.settings.setValue("redcap_token", "A" * 32)
+    names = {1: "Sentado en reposo", 2: "Caminar 4,8 km/h", 3: "Correr 8 km/h", 4: "Subir escaleras"}
+    existing = {i: {"la_session_id": "demo_session", "la_name": n} for i, n in names.items()}
+    monkeypatch.setattr(redcap, "current_rows", lambda _token, _participant, url=None: existing)
+    sent = []
+    monkeypatch.setattr(redcap, "import_records", lambda token, records, url=None: sent.append((token, records)) or 1)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **_kw: warnings.append(args))
+    seen = {}
+
+    def answer(label):
+        def fake_exec(box):
+            seen["text"] = box.text()
+            seen["default"] = box.defaultButton().text()
+            seen["button"] = next(b for b in box.buttons() if b.text() == label)
+            return 0
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda box: seen.get("button"))
+
+    # Instances of another session: nothing is sent.
+    existing[2] = {"la_session_id": "otra_sesion", "la_name": names[2]}
+    window.send_to_redcap()
+    assert not sent and "La instancia 2 es de otra sesión" in warnings[-1][2]
+    csv_path = demo / "saves_sync" / "T1" / redcap.CSV_NAME
+    assert csv_path.exists()
+
+    existing[2] = {"la_session_id": "demo_session", "la_name": names[2]}
+    answer("Enviar")
+    window.send_to_redcap()
+    assert "lo contado por T1" in seen["text"] and "Pasos: 4 actividades" in seen["text"]
+    assert seen["default"] == "Enviar"
+    token, records = sent[-1]
+    assert token == "A" * 32
+    assert {r["redcap_repeat_instance"]: r["la_steps_video"] for r in records} == {"1": "0", "2": "10", "3": "0", "4": "0"}
+    assert all(r["record_id"] == "DEMO01" and r["la_steps_video_by"] == "T1" for r in records)
+    assert project.tasks["steps"]["redcap_sent_by"] == "T1"
+    assert "en REDCap" in window.tasks_table.item(1, 2).text()
+    assert window._next_step()[1] == "📤 Exportar"
+    written = window.engine.export(tmp_path / "out")
+    assert written
+    tasks = pd.read_csv(tmp_path / "out" / "tasks.csv", keep_default_na=False)
+    assert tasks.loc[tasks["task"] == "steps", "redcap_sent_at"].item() != ""
+    activities = pd.read_csv(tmp_path / "out" / "activities.csv")
+    assert list(activities["redcap_instance"]) == [1, 2, 3, 4]
+    assert list(activities["steps_video"]) == [0, 10, 0, 0]
+
+    # Another technician's counts are replaced only if asked, and Cancel is the default.
+    existing[2].update(la_steps_video="11", la_steps_video_by="AB")
+    answer("Cancelar")
+    window.send_to_redcap()
+    assert "otro técnico (pasos de AB)" in seen["text"] and seen["default"] == "Cancelar"
+    assert len(sent) == 1
+
+    # A rejected token is forgotten.
+    def refuse(*_args, **_kw):
+        raise redcap.TokenRejected("REDCap no acepta el token (respuesta 403)")
+
+    monkeypatch.setattr(redcap, "current_rows", refuse)
+    window.send_to_redcap()
+    assert "token guardado se ha borrado" in warnings[-1][2]
+    assert not window.settings.value("redcap_token", "")
     window.close()
 
 

@@ -24,7 +24,8 @@
       "compendium_code": "07011",
       "planned_duration_seconds": 300,
       "met": 1.0,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 1
     },
     {
       "activity_index": 2,
@@ -35,7 +36,8 @@
       "compendium_code": "07040",
       "planned_duration_seconds": 240,
       "met": 1.3,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 2
     },
     {
       "activity_index": 3,
@@ -46,7 +48,8 @@
       "compendium_code": "09040",
       "planned_duration_seconds": 240,
       "met": 1.3,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 3
     },
     {
       "activity_index": 4,
@@ -57,7 +60,8 @@
       "compendium_code": "05054",
       "planned_duration_seconds": 240,
       "met": 3.5,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 4
     },
     {
       "activity_index": 5,
@@ -68,7 +72,8 @@
       "compendium_code": "05010",
       "planned_duration_seconds": 240,
       "met": 3.3,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 5
     },
     {
       "activity_index": 6,
@@ -79,7 +84,8 @@
       "compendium_code": "17131",
       "planned_duration_seconds": 240,
       "met": 6.8,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 6
     },
     {
       "activity_index": 7,
@@ -90,7 +96,8 @@
       "compendium_code": "12020",
       "planned_duration_seconds": 240,
       "met": 7.5,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 7
     },
     {
       "activity_index": 8,
@@ -101,7 +108,8 @@
       "compendium_code": "02344",
       "planned_duration_seconds": 30,
       "met": 4.0,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 8
     },
     {
       "activity_index": 9,
@@ -112,7 +120,8 @@
       "compendium_code": "17220",
       "planned_duration_seconds": 360,
       "met": 5.5,
-      "rpe": 3
+      "rpe": 3,
+      "redcap_instance": 9
     }
   ],
   "sync_windows": [

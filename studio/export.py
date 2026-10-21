@@ -59,14 +59,17 @@ signals/<sensor>.csv.gz
 heart_rate/<dispositivo>.csv
     Frecuencia cardiaca y RR del Polar, con las mismas etiquetas.
 
-activities.csv   Actividades con su inicio y fin, MET, RPE y lo contado en
-                 el vídeo en cada una (steps_video, <tipo>_video).
+activities.csv   Actividades, una fila por intento (attempt), con su
+                 inicio y fin, MET, RPE, la instancia de lab_activity en
+                 REDCap (redcap_instance) y lo contado en el vídeo en cada
+                 una (steps_video, <tipo>_video).
 phases.csv       Cada fase de cada actividad con su inicio y fin.
 steps.csv        Pasos marcados en el vídeo (si se han contado), con el
                  pie (foot: L izquierdo, R derecho, vacío si no se
                  distinguió).
 steps_per_activity.csv
-                 Pasos por actividad y cadencia (pasos/min).
+                 Pasos de cada intento de cada actividad y cadencia
+                 (pasos/min).
 events_<tipo>.csv
                  Otros eventos contados en el vídeo, uno por fila, con
                  las mismas columnas que steps.csv (event en lugar de
@@ -74,12 +77,21 @@ events_<tipo>.csv
                  events_sit_to_stand.csv: cada vez que se queda de pie
                  en el test de sentarse y levantarse de 30 s.
 events_<tipo>_per_activity.csv
-                 Esos eventos por actividad: <tipo>_main (en la
-                 actividad), <tipo>_all_phases (con las fases quietas) y
-                 <tipo>_per_min (por minuto de actividad).
+                 Esos eventos en cada intento de cada actividad:
+                 <tipo>_main (en la actividad), <tipo>_all_phases (con
+                 las fases quietas) y <tipo>_per_min (por minuto de
+                 actividad).
 tasks.csv        Tareas del técnico: la sincronización y cada conteo, con
                  su estado (not_started no iniciada, started iniciada,
-                 finished finalizada), quién la hizo y cuándo.
+                 finished finalizada), quién la hizo y cuándo, y cuándo
+                 se envió el conteo a REDCap (redcap_sent_at).
+redcap_conteos.csv
+                 Lo que «Enviar a REDCap» manda a lab_activity (si se ha
+                 usado): los pasos (la_steps_video) y las veces que se
+                 levanta en el test de sentarse y levantarse
+                 (la_reps_video) de cada intento, con el técnico que
+                 contó. Sirve también para subirlo a mano con Data
+                 Import Tool de REDCap.
 sync_report.csv  Calidad de la sincronización de cada sensor.
 anchors.csv      Palmadas y saltos encontrados en cada sensor.
 qc.json          Todos los ajustes (desfase, deriva, error) en detalle.
@@ -151,7 +163,7 @@ def read_phases(folder: str | Path, session) -> pd.DataFrame:
         rows = [
             {
                 "activity_index": a.activity_index,
-                "attempt": 1,
+                "attempt": a.attempt,
                 "phase": "activity_main",
                 "start_s": a.start_time.timestamp(),
                 "end_s": a.end_time.timestamp(),
@@ -293,6 +305,7 @@ def task_table(project: SyncProject) -> pd.DataFrame:
             "finished_at": task.get("finished_at", ""),
             "events": "" if key == SYNC_TASK else len(project.events.get(key, [])),
             "copied_from": task.get("copied_from", ""),
+            "redcap_sent_at": task.get("redcap_sent_at", ""),
         })
     return pd.DataFrame(rows)
 
@@ -375,17 +388,23 @@ def _count_columns(key: str) -> tuple[str, str, str]:
     return f"{key}_main", f"{key}_all_phases", f"{key}_per_min"
 
 
+def _of_attempt(frame: pd.DataFrame, index: int, attempt: int) -> pd.Series:
+    """Rows of ``frame`` that belong to one attempt of an activity."""
+    same = (frame["activity_index"] == index) & (frame["attempt"] == attempt)
+    return same.fillna(False).astype(bool)
+
+
 def events_per_activity(engine: SyncEngine, key: str, events: pd.DataFrame, phases: pd.DataFrame,
                         names: dict[int, str]) -> pd.DataFrame:
-    """Events of each activity (main phase and all its phases) and their rate per minute."""
+    """Events of each attempt of each activity (main phase and all its phases) and their rate per minute."""
     main_col, all_col, rate_col = _count_columns(key)
     video_range = engine.video_display_range()
     rows = []
     for activity in engine.session.activities:
-        index = activity.activity_index
-        main = phases[(phases["activity_index"] == index) & (phases["phase"] == "activity_main")]
+        index, attempt = activity.activity_index, activity.attempt
+        main = phases[_of_attempt(phases, index, attempt) & (phases["phase"] == "activity_main")]
         main_s = float((main["end_s"] - main["start_s"]).sum()) if len(main) else activity.duration_seconds
-        in_activity = events[events["activity_index"] == index]
+        in_activity = events[_of_attempt(events, index, attempt)] if len(events) else events
         in_main = in_activity[in_activity["phase"] == "activity_main"]
         covered = None
         if video_range is not None and len(main):
@@ -396,6 +415,8 @@ def events_per_activity(engine: SyncEngine, key: str, events: pd.DataFrame, phas
             covered = round(100.0 * overlap / main_s, 1) if main_s > 0 else None
         rows.append({
             "activity_index": index,
+            "attempt": attempt,
+            "redcap_instance": activity.redcap_instance,
             "activity": names.get(index, ""),
             main_col: int(len(in_main)),
             all_col: int(len(in_activity)),
@@ -407,7 +428,7 @@ def events_per_activity(engine: SyncEngine, key: str, events: pd.DataFrame, phas
 
 
 def steps_per_activity(engine: SyncEngine, steps: pd.DataFrame, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
-    """Steps of each activity (main phase and all its phases) and cadence."""
+    """Steps of each attempt of each activity (main phase and all its phases) and cadence."""
     return events_per_activity(engine, STEPS, steps, phases, names)
 
 
@@ -417,6 +438,8 @@ def activity_table(engine: SyncEngine, folder: Path, counted: dict[str, pd.DataF
     for a in engine.session.activities:
         rows.append({
             "activity_index": a.activity_index,
+            "attempt": a.attempt,
+            "redcap_instance": a.redcap_instance,
             "activity": a.activity_name,
             "compendium_code": a.compendium_code,
             "met": a.met,
@@ -435,13 +458,14 @@ def activity_table(engine: SyncEngine, folder: Path, counted: dict[str, pd.DataF
             markers = pd.read_csv(markers_path, keep_default_na=False)
         except (OSError, ValueError, pd.errors.ParserError):
             markers = pd.DataFrame()
-        extra = [c for c in ("attempt", "completion", "end_reason", "paused_seconds", "rpe_before",
+        keys = [c for c in ("activity_index", "attempt") if c in markers.columns]
+        extra = [c for c in ("completion", "end_reason", "paused_seconds", "rpe_before",
                              "resting_hr_bpm", "incident") if c in markers.columns]
-        if "activity_index" in markers.columns and extra:
-            last = markers.drop_duplicates("activity_index", keep="last")[["activity_index", *extra]]
-            frame = frame.merge(last, on="activity_index", how="left")
+        if "activity_index" in keys and extra:
+            last = markers.drop_duplicates(keys, keep="last")[[*keys, *extra]]
+            frame = frame.merge(last, on=keys, how="left")
     for key, events in counted.items():
         if len(events) and len(frame):
-            main = events[events["phase"] == "activity_main"].groupby("activity_index").size()
-            frame[f"{key}_video"] = [int(main.get(i, 0)) for i in frame["activity_index"]]
+            main = events[events["phase"] == "activity_main"].groupby(["activity_index", "attempt"]).size()
+            frame[f"{key}_video"] = [int(main.get((i, a), 0)) for i, a in zip(frame["activity_index"], frame["attempt"])]
     return frame

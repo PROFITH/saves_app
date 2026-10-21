@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -49,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from importers.manifest_importer import ManifestImporter
+from studio import redcap
 from studio.discovery import (
     FORMAT_LABELS,
     VIDEO_SUFFIXES,
@@ -74,6 +78,7 @@ from studio.project import (
 )
 from studio.signals import load_signal
 from studio.ui.plots import SignalStack, event_color, sensor_color
+from studio.ui.redcap_dialog import RedcapTokenDialog
 from studio.ui.technician import EventTypeDialog, TechnicianDialog
 from studio.ui.video_panel import VideoPanel
 from studio.ui.workers import start_job
@@ -131,6 +136,16 @@ def _short_time(iso: str) -> str:
         return ""
 
 
+@contextmanager
+def _busy():
+    """Wait cursor while REDCap answers."""
+    QApplication.setOverrideCursor(Qt.WaitCursor)
+    try:
+        yield
+    finally:
+        QApplication.restoreOverrideCursor()
+
+
 def _location_group(location: str) -> str:
     """First word of a location («Calzado, izquierda» → «Calzado»)."""
     words = location.replace(",", " ").replace("(", " ").split()
@@ -173,7 +188,7 @@ class MainWindow(QMainWindow):
         # the kind on screen per activity (main phase, all phases).
         self._event_key = STEPS
         self._event_history: dict[str, list[tuple[str, dict]]] = {}
-        self._event_counts: dict[int, tuple[int, int]] = {}
+        self._event_counts: dict[tuple[int, int], tuple[int, int]] = {}
         self._task_combos: dict[str, QComboBox] = {}
 
         self._save_timer = QTimer(self)
@@ -208,6 +223,11 @@ class MainWindow(QMainWindow):
             "código, sigues donde lo dejaste."
         )
         self.act_export = QAction("📤 Exportar", self, shortcut="Ctrl+E", triggered=self.export)
+        self.act_redcap = QAction("☁ Enviar a REDCap", self, triggered=self.send_to_redcap)
+        self.act_redcap.setToolTip(
+            "Envía a lab_activity en REDCap los pasos y las veces que se levanta en cada actividad, "
+            "de los conteos finalizados y con tu código de técnico"
+        )
         self.act_xyz = QAction("Ejes X/Y/Z", self, checkable=True, triggered=self._toggle_xyz)
         self.act_xyz.setToolTip("Ver los tres ejes en lugar del módulo (vector magnitude)")
         for action in (self.act_open, self.act_add):
@@ -243,6 +263,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.saved_label)
         bar.addSeparator()
         bar.addAction(self.act_export)
+        bar.addAction(self.act_redcap)
 
         help_menu = self.menuBar().addMenu("Ayuda")
         help_menu.addAction("Abrir una sesión de demostración", self.open_demo)
@@ -253,6 +274,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_technician)
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_export)
+        file_menu.addAction(self.act_redcap)
         self.menuBar().insertMenu(help_menu.menuAction(), file_menu)
 
     def _build_ui(self) -> None:
@@ -898,6 +920,9 @@ class MainWindow(QMainWindow):
                 who = " · ".join(x for x in (task.get("by", ""), when) if x)
                 if task.get("copied_from"):
                     who += f" (copiada de {task['copied_from']})"
+                if state == FINISHED and key in redcap.COUNT_FIELDS and project.events.get(key):
+                    who += (" · falta enviarlo a REDCap" if redcap.needs_sending(project, key)
+                            else f" · en REDCap {_short_time(task.get('redcap_sent_at', ''))}")
             table.setItem(row, 2, readonly_item(who))
         table.resizeRowsToContents()
         height = table.horizontalHeader().height() + sum(table.rowHeight(r) for r in range(len(keys))) + 2 * table.frameWidth()
@@ -1198,6 +1223,11 @@ class MainWindow(QMainWindow):
                     f"({TASK_STATE_TEXT[self.project.task_state(key)].lower()}).{so_far} Cuenta en la pestaña «Conteo» "
                     "y márcalo como finalizado al terminar; si esta sesión no lo tiene, quítalo con «Quitar».",
                     "Ir al conteo", lambda k=key: self.show_event_kind(k), "info")
+        unsent = [k for k in redcap.countable_kinds(self.project) if redcap.needs_sending(self.project, k)]
+        if unsent:
+            names = " y ".join(self.project.event_type(k).lower_name for k in unsent)
+            return (f"✅ <b>Todas las tareas están finalizadas.</b> Envía a REDCap el conteo de {names} "
+                    "y exporta los resultados.", "☁ Enviar a REDCap", self.send_to_redcap, "ok")
         return ("✅ <b>Todas las tareas están finalizadas.</b> Exporta los resultados.",
                 "📤 Exportar", self.export, "ok")
 
@@ -1643,11 +1673,12 @@ class MainWindow(QMainWindow):
         self._event_counts = {}
         if display:
             labels = label_times(np.asarray(display, dtype=float), phases, names)
-            for act, phase in zip(labels["activity_index"], labels["phase"]):
+            for act, att, phase in zip(labels["activity_index"], labels["attempt"], labels["phase"]):
                 if _is_na(act):
                     continue
-                main, total = self._event_counts.get(int(act), (0, 0))
-                self._event_counts[int(act)] = (main + (phase == "activity_main"), total + 1)
+                key = (int(act), 1 if _is_na(att) else int(att))
+                main, total = self._event_counts.get(key, (0, 0))
+                self._event_counts[key] = (main + (phase == "activity_main"), total + 1)
         steps = kind.key == STEPS
         table = self.events_table
         table.setHorizontalHeaderLabels(["Actividad", "En la actividad", "Con las fases quietas",
@@ -1655,15 +1686,20 @@ class MainWindow(QMainWindow):
         activities = self.engine.session.activities
         table.setRowCount(len(activities))
         for row, activity in enumerate(activities):
-            index = activity.activity_index
-            main_phases = phases[(phases["activity_index"] == index) & (phases["phase"] == "activity_main")] if phases is not None else []
+            index, attempt = activity.activity_index, activity.attempt
+            main_phases = (
+                phases[(phases["activity_index"] == index) & (phases["attempt"] == attempt)
+                       & (phases["phase"] == "activity_main")]
+                if phases is not None else []
+            )
             main_s = float((main_phases["end_s"] - main_phases["start_s"]).sum()) if len(main_phases) else activity.duration_seconds
-            n_main, n_all = self._event_counts.get(index, (0, 0))
+            n_main, n_all = self._event_counts.get((index, attempt), (0, 0))
             rate = ""
             if main_s > 0 and n_main:
                 rate = f"{60.0 * n_main / main_s:.0f} pasos/min" if steps else f"{60.0 * n_main / main_s:.1f}/min"
-            item = readonly_item(names.get(index, ""), bold=bool(n_all))
-            item.setData(Qt.UserRole, index)
+            name = names.get(index, "") + (f" (intento {attempt})" if attempt > 1 else "")
+            item = readonly_item(name, bold=bool(n_all))
+            item.setData(Qt.UserRole, row)
             table.setItem(row, 0, item)
             table.setItem(row, 1, readonly_item(str(n_main) if n_all else "", QColor(color), bold=True))
             table.setItem(row, 2, readonly_item(str(n_all) if n_all else ""))
@@ -1675,10 +1711,11 @@ class MainWindow(QMainWindow):
         item = self.events_table.item(row, 0)
         if item is None or self.engine is None:
             return
-        index = item.data(Qt.UserRole)
-        activity = next((a for a in self.engine.session.activities if a.activity_index == index), None)
-        if activity is None:
+        row = item.data(Qt.UserRole)
+        activities = self.engine.session.activities
+        if not isinstance(row, int) or not 0 <= row < len(activities):
             return
+        activity = activities[row]
         start, end = activity.start_time.timestamp(), activity.end_time.timestamp()
         self.plots.focus(start - 5.0, min(end, start + 60.0))
         if self.video.reader is not None:
@@ -1697,10 +1734,10 @@ class MainWindow(QMainWindow):
         if phases is None or not len(phases):
             return f"{kind.name}: {n}"
         here = label_times(np.asarray([display], dtype=float), phases, self._activity_names())
-        index = here["activity_index"][0]
+        index, attempt = here["activity_index"][0], here["attempt"][0]
         if _is_na(index):
             return f"{kind.name}: {n} en total"
-        main, total = self._event_counts.get(int(index), (0, 0))
+        main, total = self._event_counts.get((int(index), 1 if _is_na(attempt) else int(attempt)), (0, 0))
         return (f"{kind.name}: {n} en total · «{here['activity'][0]}»: "
                 f"{main} en la actividad ({total} con las fases quietas)")
 
@@ -1833,6 +1870,111 @@ class MainWindow(QMainWindow):
 
         self._run(lambda _p: engine.export(folder, export_aligned), done,
                   lambda e: QMessageBox.warning(self, "Exportar", f"No se pudo exportar:\n{e}"))
+
+    def _redcap_token(self, csv_path: Optional[Path]) -> str:  # noqa: UP045
+        """The technician's REDCap token: from REDCAP_TOKEN, from this computer or asked now."""
+        token = redcap.env_token() or str(self.settings.value("redcap_token", "") or "")
+        if token:
+            return token
+        dialog = RedcapTokenDialog(csv_path or redcap.CSV_NAME, self)
+        if dialog.exec() != QDialog.Accepted:
+            return ""
+        token, remember = dialog.values()
+        if remember:
+            self.settings.setValue("redcap_token", token)
+        return token
+
+    def _redcap_failed(self, error: Exception, csv_path: Optional[Path]) -> None:  # noqa: UP045
+        extra = ""
+        if isinstance(error, redcap.TokenRejected) and not redcap.env_token():
+            self.settings.remove("redcap_token")
+            extra = "\n\nEl token guardado se ha borrado: la próxima vez se pedirá de nuevo."
+        if csv_path is not None:
+            extra += f"\n\nLos conteos están en {csv_path}; se pueden subir con Data Import Tool de REDCap."
+        QMessageBox.warning(self, "REDCap", f"No se pudo enviar a REDCap.\n\n{error}{extra}")
+
+    def send_to_redcap(self) -> None:
+        """Sends the finished counts to the lab_activity instance of each attempt in REDCap."""
+        if self.engine is None or self.project is None:
+            return
+        participants = list(self.engine.session.participants)
+        if not participants:
+            QMessageBox.warning(self, "REDCap", "El manifiesto de la sesión no dice de qué participante es.")
+            return
+        participant = participants[0]
+        if len(participants) > 1:
+            labels = [f"{p.participant_id} · {p.redcap_event_name}" for p in participants]
+            choice, ok = QInputDialog.getItem(self, "REDCap", "¿De qué participante son los conteos?", labels, 0, False)
+            if not ok:
+                return
+            participant = participants[labels.index(choice)]
+        self._save_timer.stop()
+        self._save()
+        try:
+            prepared = redcap.count_records(self.engine, participant)
+        except redcap.RedcapError as error:
+            QMessageBox.information(self, "REDCap", str(error))
+            return
+        left_out = "".join(f"\n• {line}" for line in prepared.left_out)
+        if not prepared.records:
+            QMessageBox.information(self, "REDCap", "No hay ningún conteo que enviar."
+                                    + (f"\n\nSe quedan fuera:{left_out}" if left_out else ""))
+            return
+        try:
+            csv_path = redcap.write_import_csv(prepared.records, self.export_folder() / redcap.CSV_NAME)
+        except OSError:
+            csv_path = None
+        token = self._redcap_token(csv_path)
+        if not token:
+            where = f" Los conteos están en {csv_path}." if csv_path is not None else ""
+            self.statusBar().showMessage(f"No se ha enviado nada a REDCap.{where}", 10000)
+            return
+        try:
+            with _busy():
+                existing = redcap.current_rows(token, participant)
+        except redcap.RedcapError as error:
+            self._redcap_failed(error, csv_path)
+            return
+        problems = redcap.check_instances(prepared, existing)
+        if problems:
+            QMessageBox.warning(self, "REDCap", "No se envía nada:\n\n" + "\n".join(f"• {p}" for p in problems[:8]))
+            return
+        others = redcap.counts_of_others(prepared, existing)
+
+        lines = []
+        for key in prepared.kinds:
+            n = prepared.sent_counts.get(key, 0)
+            lines.append(f"• {self.project.event_type(key).name}: {n} actividad{'es' if n != 1 else ''}")
+        text = (f"Se enviará a lab_activity en REDCap, registro {participant.participant_id} "
+                f"({participant.redcap_event_name}), lo contado por {prepared.technician}:\n" + "\n".join(lines))
+        if left_out:
+            text += f"\n\nNo se envían:{left_out}"
+        box = QMessageBox(self)
+        box.setWindowTitle("Enviar a REDCap")
+        if others:
+            box.setIcon(QMessageBox.Warning)
+            who = "; ".join(f"{self.project.event_type(k).lower_name} de {', '.join(sorted(codes))}"
+                            for k, codes in others.items())
+            text += f"\n\nEn REDCap ya hay conteos de otro técnico ({who}). Si envías, se sustituyen por los tuyos."
+        box.setText(text)
+        send_button = box.addButton("Sustituir y enviar" if others else "Enviar", QMessageBox.AcceptRole)
+        cancel_button = box.addButton("Cancelar", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button if others else send_button)
+        box.exec()
+        if box.clickedButton() is not send_button:
+            return
+        try:
+            with _busy():
+                redcap.import_records(token, prepared.records)
+        except redcap.RedcapError as error:
+            self._redcap_failed(error, csv_path)
+            return
+        redcap.mark_sent(self.project, prepared.kinds)
+        self._save()
+        self.refresh_tasks()
+        self.refresh_banner()
+        self.statusBar().showMessage(
+            f"Enviado a REDCap: {len(prepared.records)} actividades de {participant.participant_id}", 8000)
 
     def _changed(self, task: Optional[str] = SYNC_TASK, message: str = "") -> None:  # noqa: UP045
         """Something of the synchronization changed (``task``: the task it belongs to, if the technician did it)."""

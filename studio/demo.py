@@ -82,6 +82,7 @@ def write_demo_manifest(path: Path) -> None:
                 "activity_start_time_utc": iso(START + a0),
                 "activity_end_time_utc": iso(START + a1),
                 "duration_seconds": a1 - a0,
+                "redcap_instance": idx,
             }
             for idx, name, code, a0, a1, _, _ in ACTIVITIES
         ],
