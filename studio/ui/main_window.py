@@ -2,14 +2,17 @@
 Main window of SAVES Studio.
 
 The work follows the order of the task: open the session folder (or drop
-files on the window), let the claps and jumps be detected in every sensor
-(each clock's offset is found first), let the audio of the video place the
-video, fix the events flagged in red, count the steps on the video if
-needed, and export. A banner always says what the next step is.
+files on the window) with the technician's code, let the claps and jumps be
+detected in every sensor (each clock's offset is found first), let the audio
+of the video place the video, fix the events flagged in red, count the
+steps, sit-to-stands or any other event on the video, mark each task
+finished, and export. A banner always says what the next step is, and each
+technician's work is saved apart in the session folder as it is done.
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -17,12 +20,13 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -39,17 +43,38 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from importers.manifest_importer import ManifestImporter
-from studio.discovery import FORMAT_LABELS, VIDEO_SUFFIXES, classify_file, discover, sensor_entry_for
+from studio.discovery import (
+    FORMAT_LABELS,
+    VIDEO_SUFFIXES,
+    classify_file,
+    discover,
+    sensor_entry_for,
+)
 from studio.engine import FAIR_RMSE_MS, GOOD_RMSE_MS, VIDEO, SyncEngine, analyze_signal
 from studio.export import label_times, read_phases
-from studio.project import LOCATIONS, SyncProject, VideoEntry
+from studio.project import (
+    FINISHED,
+    LOCATIONS,
+    NOT_STARTED,
+    STEPS,
+    SYNC_TASK,
+    TASK_STATE_TEXT,
+    TASK_STATES,
+    EventType,
+    SyncProject,
+    VideoEntry,
+    normalize_technician,
+    project_file,
+)
 from studio.signals import load_signal
-from studio.ui.plots import SignalStack, sensor_color
+from studio.ui.plots import SignalStack, event_color, sensor_color
+from studio.ui.technician import EventTypeDialog, TechnicianDialog
 from studio.ui.video_panel import VideoPanel
 from studio.ui.workers import start_job
 from studio.video import find_audio_events, has_audio
@@ -68,6 +93,7 @@ QUALITY_TEXT = {
     "poor": "Mal",
     "none": "Sin ajuste",
 }
+TASK_STATE_COLORS = {"not_started": "#9e9e9e", "started": "#ef8f00", "finished": "#2e7d32"}
 VIDEO_SOURCE_TEXT = {
     "claps": "ajustada con las palmadas del vídeo",
     "one_clap": "ajustada con 1 palmada (marca otra para corregir la deriva)",
@@ -98,6 +124,19 @@ def _is_na(value) -> bool:
     return value is None or value is pd.NA or (isinstance(value, float) and bool(np.isnan(value)))
 
 
+def _short_time(iso: str) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%d/%m %H:%M")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _location_group(location: str) -> str:
+    """First word of a location («Calzado, izquierda» → «Calzado»)."""
+    words = location.replace(",", " ").replace("(", " ").split()
+    return words[0] if words else location
+
+
 def readonly_item(text: str, color: Optional[QColor] = None, bold: bool = False) -> QTableWidgetItem:  # noqa: UP045
     item = QTableWidgetItem(text)
     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -111,11 +150,14 @@ def readonly_item(text: str, color: Optional[QColor] = None, bold: bool = False)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: Optional[QSettings] = None):  # noqa: UP045
         super().__init__()
         self.setWindowTitle("SAVES Studio")
         self.resize(1600, 950)
         self.setAcceptDrops(True)
+        # Remembered on this computer: the last technician's code and the
+        # kinds of events created here.
+        self.settings = settings if settings is not None else QSettings("PROFITH", "SAVES Studio")
 
         self.project: Optional[SyncProject] = None  # noqa: UP045
         self.engine: Optional[SyncEngine] = None  # noqa: UP045
@@ -124,9 +166,15 @@ class MainWindow(QMainWindow):
         self._jobs = set()
         self._plotted: list[str] = []
         self._selected_event: Optional[str] = None  # noqa: UP045
-        self._step_history: list[tuple[str, dict]] = []  # ("add" | "remove", step)
+        self._session_title = ""
         self._phases = None
-        self._step_counts: dict[int, tuple[int, int]] = {}  # activity -> (main, all phases)
+        # Events counted on the video: the kind being counted, the undo
+        # history of each kind ("add" | "remove", event) and the counts of
+        # the kind on screen per activity (main phase, all phases).
+        self._event_key = STEPS
+        self._event_history: dict[str, list[tuple[str, dict]]] = {}
+        self._event_counts: dict[int, tuple[int, int]] = {}
+        self._task_combos: dict[str, QComboBox] = {}
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -150,12 +198,22 @@ class MainWindow(QMainWindow):
 
         self.act_open = QAction("📂 Abrir sesión…", self, shortcut=QKeySequence.Open, triggered=self.choose_folder)
         self.act_add = QAction("➕ Añadir archivos…", self, shortcut="Ctrl+Shift+O", triggered=self.choose_files)
+        self.act_technician = QAction("👤 Técnico", self, triggered=self.change_technician)
+        self.act_technician.setToolTip("Cambiar de técnico: cada uno guarda su trabajo aparte en la carpeta de la sesión")
         self.act_audio = QAction("🔊 Detectar palmadas y saltos en el audio", self, triggered=self.detect_audio)
-        self.act_export = QAction("💾 Exportar", self, shortcut="Ctrl+E", triggered=self.export)
+        self.act_save = QAction("💾 Guardar", self, shortcut=QKeySequence.Save, triggered=self.save_now)
+        self.act_save.setToolTip(
+            "Tu trabajo se guarda solo después de cada cambio, en saves_project_<código>.json dentro de la "
+            "carpeta de la sesión; este botón lo guarda ya (Ctrl+S). Al volver a abrir la carpeta con tu "
+            "código, sigues donde lo dejaste."
+        )
+        self.act_export = QAction("📤 Exportar", self, shortcut="Ctrl+E", triggered=self.export)
         self.act_xyz = QAction("Ejes X/Y/Z", self, checkable=True, triggered=self._toggle_xyz)
         self.act_xyz.setToolTip("Ver los tres ejes en lugar del módulo (vector magnitude)")
         for action in (self.act_open, self.act_add):
             bar.addAction(action)
+        bar.addSeparator()
+        bar.addAction(self.act_technician)
         bar.addSeparator()
         bar.addWidget(QLabel(" Referencia: "))
         self.reference_box = QComboBox()
@@ -169,6 +227,20 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         bar.addAction(self.act_audio)
         bar.addAction(self.act_xyz)
+        self.plots_button = QToolButton()
+        self.plots_button.setText("👁 Gráficos")
+        self.plots_button.setToolTip("Elegir qué gráficos se ven (los ocultos siguen en la sincronización)")
+        self.plots_button.setPopupMode(QToolButton.InstantPopup)
+        self.plots_button.setFocusPolicy(Qt.NoFocus)
+        self.plots_menu = QMenu(self.plots_button)
+        self.plots_menu.aboutToShow.connect(self._fill_plots_menu)
+        self.plots_button.setMenu(self.plots_menu)
+        bar.addWidget(self.plots_button)
+        bar.addSeparator()
+        bar.addAction(self.act_save)
+        self.saved_label = QLabel()
+        self.saved_label.setStyleSheet("color:#555; padding:0 6px;")
+        bar.addWidget(self.saved_label)
         bar.addSeparator()
         bar.addAction(self.act_export)
 
@@ -178,6 +250,8 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("Archivo")
         file_menu.addAction(self.act_open)
         file_menu.addAction(self.act_add)
+        file_menu.addAction(self.act_technician)
+        file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_export)
         self.menuBar().insertMenu(help_menu.menuAction(), file_menu)
 
@@ -251,10 +325,26 @@ class MainWindow(QMainWindow):
         main = QSplitter(Qt.Horizontal)
         outer.addWidget(main, 1)
 
-        # Left: files and quality.
+        # Left: the technician's tasks, files and quality.
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        self.tasks_box = QGroupBox("Tareas de este vídeo")
+        tasks_layout = QVBoxLayout(self.tasks_box)
+        self.tasks_table = QTableWidget(0, 3)
+        self.tasks_table.setHorizontalHeaderLabels(["Tarea", "Estado", "Quién y cuándo"])
+        self.tasks_table.verticalHeader().hide()
+        self.tasks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.tasks_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tasks_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tasks_table.setFocusPolicy(Qt.NoFocus)
+        self.tasks_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        tasks_layout.addWidget(self.tasks_table)
+        tasks_hint = QLabel("Pasan a «Iniciada» solas al trabajar en ellas; «Finalizada» la marcas tú al terminar.")
+        tasks_hint.setWordWrap(True)
+        tasks_hint.setStyleSheet("color:#555;")
+        tasks_layout.addWidget(tasks_hint)
+        left_layout.addWidget(self.tasks_box, 0)
         files_box = QGroupBox("Archivos de la sesión")
         files_layout = QVBoxLayout(files_box)
         self.session_label = QLabel()
@@ -304,6 +394,7 @@ class MainWindow(QMainWindow):
         self.plots.anchor_moved.connect(self._anchor_moved)
         self.plots.anchor_action.connect(self._anchor_action)
         self.plots.add_anchor.connect(self._anchor_moved)
+        self.plots.plot_visibility.connect(self._plot_visibility)
         centre.addWidget(self.plots)
         self.tabs = QTabWidget()
         claps_box = QWidget()
@@ -323,7 +414,7 @@ class MainWindow(QMainWindow):
         self.claps_table.customContextMenuRequested.connect(self._clap_menu)
         claps_layout.addWidget(self.claps_table)
         self.tabs.addTab(claps_box, "Palmadas y saltos")
-        self.tabs.addTab(self._build_steps_tab(), "👣 Pasos")
+        self.tabs.addTab(self._build_events_tab(), "🔢 Conteo")
         centre.addWidget(self.tabs)
         centre.setStretchFactor(0, 3)
         centre.setStretchFactor(1, 1)
@@ -333,7 +424,7 @@ class MainWindow(QMainWindow):
         self.video = VideoPanel()
         self.video.frame_changed.connect(self._video_frame)
         self.video.mark_requested.connect(self.mark_video_clap)
-        self.video.step_requested.connect(self.mark_step)
+        self.video.event_requested.connect(self.mark_event)
         main.addWidget(self.video)
 
         main.setStretchFactor(0, 0)
@@ -342,27 +433,44 @@ class MainWindow(QMainWindow):
         main.setSizes([420, 720, 380])
         return page
 
-    def _build_steps_tab(self) -> QWidget:
+    def _build_events_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
-        hint = QLabel(
-            "Reproduce el vídeo despacio (0,25× o 0,5×) y pulsa <b>S</b> en cada apoyo del pie "
-            "(<b>A</b> izquierdo, <b>D</b> derecho si los distingues). <b>Retroceso</b> borra el paso "
-            "más cercano y <b>Ctrl+Z</b> deshace. Doble clic en una actividad: ir a su inicio."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#555;")
-        layout.addWidget(hint)
-        self.steps_table = QTableWidget(0, 5)
-        self.steps_table.setHorizontalHeaderLabels(["Actividad", "Pasos (actividad)", "Pasos (con fases quietas)", "Cadencia", "Duración"])
-        self.steps_table.verticalHeader().hide()
-        self.steps_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.steps_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.steps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.steps_table.setFocusPolicy(Qt.NoFocus)
-        self.steps_table.cellDoubleClicked.connect(self._steps_row_clicked)
-        layout.addWidget(self.steps_table)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Qué cuentas:"))
+        self.event_kind_box = QComboBox()
+        self.event_kind_box.setFocusPolicy(Qt.NoFocus)  # S, A and D must reach the shortcuts
+        self.event_kind_box.setToolTip("Lo que marcan S (y A / D) en el vídeo. Cada tipo es una tarea de la lista.")
+        self.event_kind_box.currentIndexChanged.connect(self._event_kind_changed)
+        row.addWidget(self.event_kind_box, 1)
+        self.finish_kind_button = QPushButton()
+        self.finish_kind_button.setFocusPolicy(Qt.NoFocus)
+        self.finish_kind_button.clicked.connect(lambda: self.set_task_state(self._event_key, FINISHED))
+        row.addWidget(self.finish_kind_button)
+        new_kind = QPushButton("➕ Otro evento…")
+        new_kind.setFocusPolicy(Qt.NoFocus)
+        new_kind.setToolTip("Contar algo distinto en el vídeo (se añade a esta sesión con su propia tarea)")
+        new_kind.clicked.connect(self.add_event_kind)
+        row.addWidget(new_kind)
+        self.remove_kind_button = QPushButton("Quitar")
+        self.remove_kind_button.setFocusPolicy(Qt.NoFocus)
+        self.remove_kind_button.setToolTip("Quitar este tipo de la sesión si no se cuenta en ella (solo sin eventos marcados)")
+        self.remove_kind_button.clicked.connect(self.remove_event_kind)
+        row.addWidget(self.remove_kind_button)
+        layout.addLayout(row)
+        self.events_hint = QLabel()
+        self.events_hint.setWordWrap(True)
+        self.events_hint.setStyleSheet("color:#555;")
+        layout.addWidget(self.events_hint)
+        self.events_table = QTableWidget(0, 5)
+        self.events_table.verticalHeader().hide()
+        self.events_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.events_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.events_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.events_table.setFocusPolicy(Qt.NoFocus)
+        self.events_table.cellDoubleClicked.connect(self._events_row_clicked)
+        layout.addWidget(self.events_table)
         return page
 
     def _build_shortcuts(self) -> None:
@@ -379,11 +487,11 @@ class MainWindow(QMainWindow):
             "P": lambda: self.select_relative(-1),
             "Delete": self.clear_video_clap,
             "X": lambda: self.act_xyz.trigger(),
-            "S": lambda: self.mark_step(""),
-            "A": lambda: self.mark_step("L"),
-            "D": lambda: self.mark_step("R"),
-            "Backspace": self.remove_step,
-            "Ctrl+Z": self.undo_step,
+            "S": lambda: self.mark_event(""),
+            "A": lambda: self.mark_event("L"),
+            "D": lambda: self.mark_event("R"),
+            "Backspace": self.remove_event,
+            "Ctrl+Z": self.undo_event,
         }
         for key, slot in bindings.items():
             shortcut = QShortcut(QKeySequence(key), self)
@@ -399,8 +507,10 @@ class MainWindow(QMainWindow):
             "N / P: evento (palmada o salto) siguiente / anterior\n"
             "M: marcar el evento en el vídeo (fotograma actual)\n"
             "Supr: borrar la marca del vídeo del evento elegido\n"
-            "S: paso en el fotograma actual (A: pie izquierdo, D: pie derecho)\n"
-            "Retroceso: borrar el paso más cercano · Ctrl+Z: deshacer el último cambio de pasos\n"
+            "S: marcar lo que cuentas (pestaña «Conteo») en el fotograma actual;\n"
+            "    A / D: lado izquierdo / derecho, si ese tipo los distingue\n"
+            "Retroceso: borrar la marca más cercana · Ctrl+Z: deshacer el último cambio de ese tipo\n"
+            "Ctrl+S: guardar ya (también se guarda solo) · Ctrl+E: exportar\n"
             "X: ver ejes X/Y/Z o el módulo\n"
             "Gráficas: rueda para zoom, arrastrar para desplazarse, clic para llevar el vídeo a ese instante,\n"
             "arrastrar una línea de evento para corregirla, clic derecho para más opciones."
@@ -432,12 +542,33 @@ class MainWindow(QMainWindow):
             build_demo_session(folder)
         self.open_folder(folder)
 
-    def open_folder(self, folder: str | Path) -> None:
+    def open_folder(self, folder: str | Path, technician: Optional[str] = None,  # noqa: UP045
+                    copy_from: Optional[str] = None) -> None:  # noqa: UP045
+        """
+        Open a session folder with the work of a technician.
+
+        Without ``technician`` the technician is asked for their code; the
+        work saved under that code is restored, or a new one starts (from
+        the synchronization of technician ``copy_from`` if they choose so).
+        """
         folder = Path(folder)
+        if technician is None:
+            dialog = TechnicianDialog(folder, str(self.settings.value("technician", "") or ""), self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            code, copy_from = dialog.choice()
+        else:
+            code = normalize_technician(technician)
+        # The work open now is saved before it is closed.
+        self._save_timer.stop()
+        self._save()
         self._close_session()
         found = discover(folder)
-        if SyncProject.exists_in(folder):
-            project = SyncProject.load(folder)
+        own = SyncProject.exists_in(folder, code)
+        project = self._saved_project(folder, code, copy_from)
+        # New for this technician (not their own saved work).
+        new = not (own and project is not None)
+        if project is not None:
             known = {str(Path(s.path).resolve()) for s in project.sensors}
             for entry in found.sensors:
                 if str(Path(entry.path).resolve()) not in known:
@@ -446,11 +577,20 @@ class MainWindow(QMainWindow):
                 project.videos = found.videos
             project.manifest_path = project.manifest_path or found.manifest_path
         else:
-            project = SyncProject(folder=str(folder), manifest_path=found.manifest_path, videos=found.videos)
+            project = SyncProject(folder=str(folder), manifest_path=found.manifest_path, videos=found.videos,
+                                  technician=code)
             for entry in found.sensors:
                 project.add_sensor(entry)
+        if new:
+            for kind in self._remembered_kinds():
+                if kind.get("new_sessions"):
+                    project.add_event_type(str(kind["name"]), bool(kind.get("sides")))
+        if code:
+            self.settings.setValue("technician", code)
         self.project = project
-        self._step_history = []
+        self._event_history = {}
+        if self._event_key not in {k.key for k in project.event_types}:
+            self._event_key = project.event_types[0].key if project.event_types else STEPS
         self.stack.setCurrentIndex(1)
         self._load_manifest()
         self._open_video()
@@ -466,6 +606,55 @@ class MainWindow(QMainWindow):
         if self.engine is not None and self.project.videos and not self.project.video_events:
             QTimer.singleShot(0, lambda: self.detect_audio(auto=True))
 
+    def _saved_project(self, folder: Path, code: str, copy_from: Optional[str]) -> Optional[SyncProject]:  # noqa: UP045
+        """The work saved for ``code`` in ``folder``, or None to start a new one."""
+        path = folder / project_file(code)
+        if path.exists():
+            try:
+                return SyncProject.load(folder, code)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                # Never overwrite it: set it aside and start again.
+                backup = path.with_name(f"{path.name}.ilegible-{datetime.now():%Y%m%d-%H%M%S}")
+                try:
+                    path.replace(backup)
+                    where = f"Se ha apartado como {backup.name}"
+                except OSError:
+                    where = "No se ha podido apartar"
+                QMessageBox.warning(self, "Trabajo guardado ilegible", (
+                    f"No se pudo leer {path.name}:\n{exc}\n\n{where} y la sesión se abre de cero."
+                ))
+                return None
+        if not code:
+            return None
+        if copy_from is not None:
+            try:
+                source = SyncProject.load(folder, copy_from)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                QMessageBox.warning(self, "Sincronización", f"No se pudo leer el trabajo de {copy_from}:\n{exc}")
+                return None
+            project = SyncProject(folder=str(folder), technician=code)
+            project.copy_sync_from(source)
+            return project
+        if not SyncProject.technicians_in(folder) and SyncProject.exists_in(folder):
+            # Work saved before technicians had codes: it becomes this technician's.
+            try:
+                project = SyncProject.load(folder)
+            except (OSError, ValueError, KeyError, TypeError):
+                return None
+            project.technician = code
+            if project.has_sync_work():
+                project.work_on(SYNC_TASK)
+            for kind in project.event_types:
+                if project.events.get(kind.key):
+                    project.work_on(kind.key)
+            return project
+        return None
+
+    def change_technician(self) -> None:
+        """Reopen the session with another technician's code."""
+        if self.project is not None:
+            self.open_folder(self.project.folder)
+
     def add_paths(self, paths: list[Path]) -> None:
         if self.project is None:
             folder = next((p for p in paths if p.is_dir()), None)
@@ -475,10 +664,13 @@ class MainWindow(QMainWindow):
             else:
                 manifest = next((p for p in paths if p.name == "session_manifest.json"), None)
                 self.open_folder((manifest or paths[0]).parent)
+            if self.project is None:
+                return  # The technician did not give a code.
         expanded = []
         for p in paths:
             expanded.extend(sorted(x for x in p.iterdir() if x.is_file()) if p.is_dir() else [p])
         added_video = False
+        before = (len(self.project.sensors), len(self.project.videos))
         for p in expanded:
             if p.name == "session_manifest.json":
                 self.project.manifest_path = str(p)
@@ -496,6 +688,8 @@ class MainWindow(QMainWindow):
                     self._load_sensor(entry.sensor_id)
         if added_video and self.video.reader is None:
             self._open_video()
+        if (len(self.project.sensors), len(self.project.videos)) != before:
+            self.project.work_on(SYNC_TASK)
         self._schedule_save()
         self.refresh_all()
 
@@ -505,6 +699,8 @@ class MainWindow(QMainWindow):
         self._phases = None
         self.loading, self.errors = {}, {}
         self._plotted = []
+        self._session_title = ""
+        self.saved_label.setText("")
         self.plots.set_engine(None)
 
     def _load_manifest(self) -> None:
@@ -524,7 +720,7 @@ class MainWindow(QMainWindow):
             for sid, signal in old.signals.items():
                 self._analyze_in_background(sid, signal)
         participants = ", ".join(p.participant_id for p in session.participants)
-        self.setWindowTitle(f"SAVES Studio — {session.session_id}" + (f" ({participants})" if participants else ""))
+        self._session_title = session.session_id + (f" ({participants})" if participants else "")
 
     def _open_video(self) -> None:
         if not self.project or not self.project.videos:
@@ -628,26 +824,131 @@ class MainWindow(QMainWindow):
     def refresh_all(self) -> None:
         if self.project is None:
             self.stack.setCurrentIndex(0)
-            for action in (self.act_add, self.act_audio, self.act_export, self.act_xyz):
+            for action in (self.act_add, self.act_audio, self.act_export, self.act_xyz, self.act_save,
+                           self.act_technician):
                 action.setEnabled(False)
+            self.act_technician.setText("👤 Técnico")
+            self.plots_button.setEnabled(False)
             self.reference_box.setEnabled(False)
+            self.setWindowTitle("SAVES Studio")
             return
         self.stack.setCurrentIndex(1)
         self.act_add.setEnabled(True)
+        self.act_save.setEnabled(True)
+        self.act_technician.setEnabled(True)
+        self.plots_button.setEnabled(self.engine is not None)
         has_engine = self.engine is not None
         self.act_audio.setEnabled(has_engine and self.video.reader is not None)
         self.act_export.setEnabled(has_engine and bool(self.engine.signals) if has_engine else False)
         self.act_xyz.setEnabled(True)
         self.reference_box.setEnabled(True)
+        self.refresh_title()
         self.refresh_reference_box()
         self.refresh_session_label()
+        self.refresh_tasks()
         self.refresh_sensors_table()
         self.refresh_quality()
         self.refresh_claps_table()
         self.refresh_plots()
-        self.refresh_steps()
+        self.refresh_events()
         self.refresh_video_label()
         self.refresh_banner()
+
+    def refresh_title(self) -> None:
+        code = self.project.technician
+        self.act_technician.setText(f"👤 {code}" if code else "👤 Técnico")
+        title = "SAVES Studio" + (f" — {self._session_title}" if self._session_title else "")
+        self.setWindowTitle(title + (f" · técnico {code}" if code else ""))
+
+    def refresh_tasks(self) -> None:
+        """The checklist: one row per task, with a state the technician can change."""
+        if self.project is None:
+            return
+        project = self.project
+        keys = project.task_keys()
+        table = self.tasks_table
+        if list(self._task_combos) != keys:
+            # The rows change only when a kind of event is added or removed;
+            # otherwise the combos are kept (one may be emitting right now).
+            table.setRowCount(0)
+            table.setRowCount(len(keys))
+            self._task_combos = {}
+            for row, key in enumerate(keys):
+                combo = QComboBox()
+                combo.setFocusPolicy(Qt.NoFocus)
+                for value in TASK_STATES:
+                    combo.addItem(TASK_STATE_TEXT[value], value)
+                combo.currentIndexChanged.connect(
+                    lambda index, k=key, c=combo: self.set_task_state(k, c.itemData(index))
+                )
+                table.setCellWidget(row, 1, combo)
+                self._task_combos[key] = combo
+        for row, key in enumerate(keys):
+            state = project.task_state(key)
+            table.setItem(row, 0, readonly_item(project.task_name(key), bold=state != FINISHED))
+            combo = self._task_combos[key]
+            combo.blockSignals(True)
+            combo.setCurrentIndex(TASK_STATES.index(state))
+            combo.blockSignals(False)
+            combo.setStyleSheet(f"QComboBox{{color:{TASK_STATE_COLORS[state]}; font-weight:bold;}}")
+            task = project.tasks.get(key, {})
+            who = ""
+            if state != NOT_STARTED:
+                when = _short_time(task.get("finished_at") if state == FINISHED else task.get("started_at", ""))
+                who = " · ".join(x for x in (task.get("by", ""), when) if x)
+                if task.get("copied_from"):
+                    who += f" (copiada de {task['copied_from']})"
+            table.setItem(row, 2, readonly_item(who))
+        table.resizeRowsToContents()
+        height = table.horizontalHeader().height() + sum(table.rowHeight(r) for r in range(len(keys))) + 2 * table.frameWidth()
+        table.setFixedHeight(height)
+        pending = len(project.pending_tasks())
+        who = f" · técnico {project.technician}" if project.technician else ""
+        self.tasks_box.setTitle(
+            f"Tareas de este vídeo{who} · " + (f"{pending} sin finalizar" if pending else "todas finalizadas")
+        )
+
+    def set_task_state(self, key: str, state: str) -> None:
+        """The technician sets the state of a task (only they finish one)."""
+        if self.project is None or key not in self.project.task_keys():
+            return
+        if state == self.project.task_state(key):
+            return
+        if state == FINISHED and not self._confirm_finished(key):
+            self.refresh_tasks()
+            return
+        self.project.set_task_state(key, state)
+        self.statusBar().showMessage(f"«{self.project.task_name(key)}»: {TASK_STATE_TEXT[state].lower()}", 4000)
+        self._schedule_save()
+        self.refresh_tasks()
+        self.refresh_events()
+        self.refresh_banner()
+
+    def _confirm_finished(self, key: str) -> bool:
+        """Ask before finishing a task that does not look done."""
+        if key == SYNC_TASK:
+            if self.engine is None:
+                return self._confirm("Sincronización", "La sesión no tiene manifiesto, así que no hay sincronización. "
+                                     "¿Marcarla como finalizada igualmente?")
+            bad = [sid for sid in self.engine.active_sensors() if self.engine.status(sid).quality in ("none", "poor")]
+            if self.loading:
+                bad = bad or ["(aún se están leyendo archivos)"]
+            if bad:
+                return self._confirm("Sincronización", (
+                    f"Hay sensores sin ajustar o en rojo: {', '.join(bad)}.\n\n¿Marcar la sincronización como finalizada igualmente?"
+                ))
+            return True
+        if not self.project.events.get(key):
+            name = self.project.event_type(key).lower_name
+            return self._confirm("Conteo", (
+                f"No hay ninguna marca de {name}.\n\n¿Marcar el conteo como finalizado igualmente "
+                "(por ejemplo, porque en este vídeo no hay ninguno)?"
+            ))
+        return True
+
+    def _confirm(self, title: str, text: str) -> bool:
+        answer = QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
 
     def refresh_reference_box(self) -> None:
         self.reference_box.blockSignals(True)
@@ -812,13 +1113,14 @@ class MainWindow(QMainWindow):
             self.plots.set_engine(None)
             self._plotted = []
             return
-        active = self.engine.active_sensors()
-        if active != self._plotted or self.plots.engine is not self.engine:
-            view = self.plots.view_range() if self._plotted else None
+        hidden = set(self.project.hidden_plots)
+        shown = [sid for sid in self.engine.active_sensors() if sid not in hidden]
+        if shown != self._plotted or self.plots.engine is not self.engine:
+            view = self.plots.view_range() if self.plots.plots else None
             self.plots.set_engine(self.engine)
             if view:
                 self.plots.focus(*view)
-            self._plotted = list(active)
+            self._plotted = list(shown)
         else:
             self.plots.refresh_overview()
             self.plots.refresh_markers()
@@ -881,10 +1183,23 @@ class MainWindow(QMainWindow):
             audio = " o pulsa «Detectar palmadas y saltos en el audio»" if self.video.reader else ""
             return (f"<b>Marca las palmadas o saltos en el vídeo</b> (al menos 2){audio}. Al marcar uno, se pasa solo al siguiente.",
                     "Empezar", lambda e=pending: self.focus_event(e), "info")
-        steps = f" Llevas {len(self.project.steps)} pasos contados." if self.project.steps else ""
-        return ("✅ <b>Todo sincronizado.</b> Revisa la tabla de calidad y exporta los resultados."
-                f"{steps} Para contar pasos, abre la pestaña «Pasos».",
-                "💾 Exportar", self.export, "ok")
+        pending = self.project.pending_tasks()
+        if SYNC_TASK in pending:
+            return ("✅ <b>La sincronización está bien.</b> Revisa la tabla de calidad y, cuando hayas terminado, "
+                    "márcala como finalizada.",
+                    "✓ Sincronización finalizada", lambda: self.set_task_state(SYNC_TASK, FINISHED), "ok")
+        if pending:
+            # The kind being counted first, if it is still open.
+            key = self._event_key if self._event_key in pending else pending[0]
+            kind = self.project.event_type(key)
+            n = len(self.project.events.get(key, []))
+            so_far = f" Llevas {n}." if n else ""
+            return (f"<b>Falta el conteo de {kind.lower_name}</b> "
+                    f"({TASK_STATE_TEXT[self.project.task_state(key)].lower()}).{so_far} Cuenta en la pestaña «Conteo» "
+                    "y márcalo como finalizado al terminar; si esta sesión no lo tiene, quítalo con «Quitar».",
+                    "Ir al conteo", lambda k=key: self.show_event_kind(k), "info")
+        return ("✅ <b>Todas las tareas están finalizadas.</b> Exporta los resultados.",
+                "📤 Exportar", self.export, "ok")
 
     # ==================================================================
     # Claps: selection, video marks and corrections
@@ -948,8 +1263,7 @@ class MainWindow(QMainWindow):
             display = float(self.engine.video_to_display(self.video.current_time))
             event_id = self.plots._nearest_window(display).event_id
         self.project.video_events[event_id] = float(self.video.current_time)
-        self._changed()
-        self.statusBar().showMessage(f"Palmada {event_id} marcada en el vídeo a {self.video.current_time:.3f} s", 4000)
+        self._changed(message=f"Palmada {event_id} marcada en el vídeo a {self.video.current_time:.3f} s")
         # Go straight to the next clap still unmarked in the video.
         pending = [w.event_id for w in self.engine.session.sync_windows if w.event_id not in self.project.video_events]
         if pending:
@@ -967,8 +1281,7 @@ class MainWindow(QMainWindow):
             return
         native = float(self.engine.display_to_sensor(sensor_id, display_s))
         self.project.set_manual_anchor(sensor_id, event_id, native)
-        self.statusBar().showMessage(f"Palmada {event_id} de {sensor_id} corregida a mano", 4000)
-        self._changed()
+        self._changed(message=f"Palmada {event_id} de {sensor_id} corregida a mano")
 
     def _anchor_action(self, sensor_id: str, event_id: str, action: str) -> None:
         if action == "exclude":
@@ -1028,7 +1341,7 @@ class MainWindow(QMainWindow):
         display = float(self.engine.video_to_display(video_s))
         self.plots.set_cursor(display, follow=self.video.playing)
         self.video.set_host_text(f"Hora de sesión {clock(display)}  ({VIDEO_SOURCE_TEXT[self.engine.video_fit_source]})")
-        self.video.set_steps_text(self._steps_text(display))
+        self.video.set_events_text(self._events_text(display))
 
     def _plot_clicked(self, display_s: float) -> None:
         if self.engine is not None and self.video.reader is not None:
@@ -1058,6 +1371,10 @@ class MainWindow(QMainWindow):
         sid = self.project.sensors[row].sensor_id
         menu = QMenu(self)
         menu.addAction("Usar como referencia", lambda: self._set_reference(sid))
+        if sid in self.project.hidden_plots:
+            menu.addAction("Mostrar su gráfico", lambda: self._set_plot_hidden(sid, False))
+        else:
+            menu.addAction("Ocultar su gráfico", lambda: self._set_plot_hidden(sid, True))
         menu.addAction("Volver a leer el archivo", lambda: self._load_sensor(sid))
         menu.addAction("Abrir la carpeta del archivo", lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(Path(self.project.sensor(sid).path).parent))))
@@ -1076,13 +1393,67 @@ class MainWindow(QMainWindow):
         self.project.reference = value
         self._changed()
 
+    # ------------------------------------------------------------------
+    # Which plots are shown
+    # ------------------------------------------------------------------
+
+    def _plot_candidates(self) -> list[str]:
+        return self.engine.active_sensors() if self.engine is not None else []
+
+    def _fill_plots_menu(self) -> None:
+        menu = self.plots_menu
+        menu.clear()
+        ids = self._plot_candidates()
+        if not ids:
+            menu.addAction("Aún no hay gráficos").setEnabled(False)
+            return
+        hidden = set(self.project.hidden_plots)
+        for sid in ids:
+            action = menu.addAction(f"{sid} · {self.project.sensor(sid).location}")
+            action.setCheckable(True)
+            action.setChecked(sid not in hidden)
+            action.toggled.connect(lambda on, s=sid: self._set_plot_hidden(s, not on))
+        groups: dict[str, list[str]] = {}
+        for sid in ids:
+            groups.setdefault(_location_group(self.project.sensor(sid).location), []).append(sid)
+        if len(groups) > 1:
+            menu.addSeparator()
+            for group, members in groups.items():
+                menu.addAction(f"Ver solo: {group} ({len(members)})", lambda m=members: self._show_only(m))
+        menu.addSeparator()
+        menu.addAction("Mostrar todos", lambda: self._show_only(ids)).setEnabled(bool(hidden & set(ids)))
+
+    def _set_plot_hidden(self, sensor_id: str, hidden: bool) -> None:
+        if self.project is None:
+            return
+        self.project.set_plot_hidden(sensor_id, hidden)
+        self._schedule_save()
+        self.refresh_plots()
+        self.refresh_events()
+
+    def _show_only(self, sensor_ids: list[str]) -> None:
+        if self.project is None:
+            return
+        keep = set(sensor_ids)
+        for sid in self._plot_candidates():
+            self.project.set_plot_hidden(sid, sid not in keep)
+        self._schedule_save()
+        self.refresh_plots()
+        self.refresh_events()
+
+    def _plot_visibility(self, sensor_id: str, action: str) -> None:
+        if action == "only":
+            self._show_only([sensor_id])
+        else:
+            self._set_plot_hidden(sensor_id, True)
+
     def _reference_changed(self, _index: int) -> None:
         value = self.reference_box.currentData()
         if self.project is not None and value is not None and value != self.project.reference:
             self._set_reference(value)
 
     # ==================================================================
-    # Steps counted on the video
+    # Events counted on the video (steps, sit-to-stands or any other)
     # ==================================================================
 
     def _session_phases(self):
@@ -1095,79 +1466,213 @@ class MainWindow(QMainWindow):
             return {}
         return {a.activity_index: a.activity_name or f"Actividad {a.activity_index}" for a in self.engine.session.activities}
 
-    def mark_step(self, foot: str = "") -> None:
-        """Step at the frame on screen (keys S, A and D)."""
-        if self.project is None or self.video.current_time is None:
-            return
-        step = self.project.add_step(self.video.current_time, foot)
-        self._step_history.append(("add", step))
-        self._steps_changed(f"Paso {len(self.project.steps)} a {step['video_s']:.2f} s" + (f" (pie {'izquierdo' if foot == 'L' else 'derecho'})" if foot else ""))
+    def _event_kind(self) -> Optional[EventType]:  # noqa: UP045
+        """The kind of event being counted (S, A and D mark it)."""
+        if self.project is None or not self.project.event_types:
+            return None
+        try:
+            return self.project.event_type(self._event_key)
+        except KeyError:
+            self._event_key = self.project.event_types[0].key
+            return self.project.event_types[0]
 
-    def remove_step(self) -> None:
-        if self.project is None or self.video.current_time is None:
+    def show_event_kind(self, key: str) -> None:
+        self._event_key = key
+        self.tabs.setCurrentIndex(1)
+        self.refresh_events()
+
+    def _event_kind_changed(self, index: int) -> None:
+        key = self.event_kind_box.itemData(index)
+        if key and key != self._event_key:
+            self._event_key = key
+            self.refresh_events()
+
+    def mark_event(self, side: str = "") -> None:
+        """Event of the kind being counted at the frame on screen (keys S, A and D)."""
+        kind = self._event_kind()
+        if kind is None or self.video.current_time is None:
             return
-        removed = self.project.remove_step_near(self.video.current_time)
+        if side and not kind.sides:
+            self.statusBar().showMessage(f"«{kind.name}» no distingue izquierda y derecha: marca con S", 4000)
+            return
+        event = self.project.add_event(kind.key, self.video.current_time, side)
+        self._event_history.setdefault(kind.key, []).append(("add", event))
+        side_text = {"L": " (izquierda)", "R": " (derecha)"}.get(side, "")
+        self._events_changed(kind.key, f"{kind.name}: {len(self.project.events_of(kind.key))}, "
+                                       f"el último a {event['video_s']:.2f} s{side_text}")
+
+    def remove_event(self) -> None:
+        kind = self._event_kind()
+        if kind is None or self.video.current_time is None:
+            return
+        removed = self.project.remove_event_near(kind.key, self.video.current_time)
         if removed is None:
-            self.statusBar().showMessage("No hay ningún paso a menos de 0,5 s del fotograma actual", 4000)
+            self.statusBar().showMessage(f"No hay ninguna marca de {kind.lower_name} a menos de 0,5 s del fotograma actual", 4000)
             return
-        self._step_history.append(("remove", removed))
-        self._steps_changed(f"Paso de {removed['video_s']:.2f} s borrado")
+        self._event_history.setdefault(kind.key, []).append(("remove", removed))
+        self._events_changed(kind.key, f"{kind.name}: borrada la marca de {removed['video_s']:.2f} s")
 
-    def undo_step(self) -> None:
-        if self.project is None or not self._step_history:
+    def undo_event(self) -> None:
+        kind = self._event_kind()
+        if kind is None:
             return
-        action, step = self._step_history.pop()
+        history = self._event_history.get(kind.key)
+        if not history:
+            self.statusBar().showMessage(f"No hay nada que deshacer en {kind.lower_name}", 3000)
+            return
+        action, event = history.pop()
         if action == "add":
-            self.project.steps = [s for s in self.project.steps if s is not step and s != step]
+            self.project.events[kind.key] = [e for e in self.project.events_of(kind.key) if e is not event]
         else:
-            self.project.add_step(step["video_s"], step.get("foot", ""))
-        self._steps_changed("Deshecho")
+            self.project.add_event(kind.key, event["video_s"], event.get("side", ""))
+        self._events_changed(kind.key, f"{kind.name}: deshecho")
 
-    def _steps_changed(self, message: str) -> None:
-        self.statusBar().showMessage(message, 3000)
+    def _events_changed(self, key: str, message: str) -> None:
+        timeout = 3000
+        if self.project.work_on(key) == "reopened":
+            message += (f". La tarea «{self.project.task_name(key)}» vuelve a «Iniciada»: "
+                        "márcala como finalizada cuando termines")
+            timeout = 10000
+        self.statusBar().showMessage(message, timeout)
         self._schedule_save()
-        self.refresh_steps()
+        self.refresh_events()
+        self.refresh_tasks()
+        self.refresh_banner()
 
-    def refresh_steps(self) -> None:
+    def add_event_kind(self) -> None:
+        """A new kind of event to count in this session."""
         if self.project is None:
             return
-        steps = self.project.step_times()
-        if self.engine is None:
-            self.plots.set_steps([])
+        dialog = EventTypeDialog(self._remembered_kinds(), self)
+        if dialog.exec() != QDialog.Accepted:
             return
-        display = [float(t) for t in np.atleast_1d(self.engine.video_to_display(steps))] if steps else []
-        self.plots.set_steps(display)
+        name, sides, new_sessions = dialog.values()
+        if not name:
+            return
+        kind = self.project.add_event_type(name, sides)
+        self._remember_kind(kind.name, kind.sides, new_sessions)
+        self._event_key = kind.key
+        self.tabs.setCurrentIndex(1)
+        self._schedule_save()
+        self.refresh_all()
+        self.statusBar().showMessage(f"Ahora cuentas «{kind.name}»: S en el fotograma de cada uno", 5000)
+
+    def remove_event_kind(self) -> None:
+        """Take a kind of event out of this session (only one with nothing marked)."""
+        kind = self._event_kind()
+        if kind is None:
+            return
+        try:
+            self.project.remove_event_type(kind.key)
+        except ValueError:
+            self.statusBar().showMessage(f"«{kind.name}» tiene marcas: bórralas antes de quitarlo", 5000)
+            return
+        remembered = next((k for k in self._remembered_kinds() if k.get("name") == kind.name), None)
+        if remembered and remembered.get("new_sessions") and self._confirm(
+            "Sesiones nuevas", f"«{kind.name}» se añade a las sesiones nuevas de este ordenador. ¿Dejar de añadirlo?"
+        ):
+            self._remember_kind(kind.name, kind.sides, False)
+        self._event_key = self.project.event_types[0].key if self.project.event_types else STEPS
+        self._event_history.pop(kind.key, None)
+        self._schedule_save()
+        self.refresh_all()
+        self.statusBar().showMessage(f"«{kind.name}» quitado de esta sesión", 4000)
+
+    def _remembered_kinds(self) -> list[dict]:
+        """Kinds of events created on this computer: name, sides and whether new sessions get them."""
+        raw = self.settings.value("event_types", "[]")
+        try:
+            kinds = json.loads(raw if isinstance(raw, str) else "[]")
+        except ValueError:
+            return []
+        return [k for k in kinds if isinstance(k, dict) and k.get("name")]
+
+    def _remember_kind(self, name: str, sides: bool, new_sessions: bool) -> None:
+        kinds = [k for k in self._remembered_kinds() if k.get("name") != name]
+        kinds.append({"name": name, "sides": sides, "new_sessions": new_sessions})
+        self.settings.setValue("event_types", json.dumps(kinds[-30:], ensure_ascii=False))
+
+    def refresh_events(self) -> None:
+        if self.project is None:
+            return
+        kind = self._event_kind()
+        box = self.event_kind_box
+        box.blockSignals(True)
+        box.clear()
+        for k in self.project.event_types:
+            n = len(self.project.events.get(k.key, []))
+            box.addItem(f"{k.name} ({n})" if n else k.name, k.key)
+        box.setCurrentIndex(max(box.findData(self._event_key), 0))
+        box.blockSignals(False)
+        if kind is None:
+            self.events_hint.setText("No hay nada que contar en esta sesión. Añade lo que quieras contar con «➕ Otro evento…».")
+            self.remove_kind_button.setEnabled(False)
+            self.finish_kind_button.setVisible(False)
+            self.events_table.setRowCount(0)
+            self.plots.set_events([])
+            self.tabs.setTabText(1, "🔢 Conteo")
+            self._video_frame(self.video.current_time)
+            return
+        times = self.project.event_times(kind.key)
+        self.remove_kind_button.setEnabled(not times)
+        finished = self.project.task_state(kind.key) == FINISHED
+        self.finish_kind_button.setVisible(True)
+        self.finish_kind_button.setEnabled(not finished)
+        self.finish_kind_button.setText("✓ Conteo finalizado" if finished else "Finalizar el conteo")
+        self.finish_kind_button.setToolTip(
+            "Cámbialo en la lista de tareas si tienes que volver a él" if finished
+            else f"Marca como finalizada la tarea «{self.project.task_name(kind.key)}»"
+        )
+        sides = " (<b>A</b> izquierda, <b>D</b> derecha si las distingues)" if kind.sides else ""
+        self.events_hint.setText(
+            f"Reproduce el vídeo despacio (0,25× o 0,5×) y pulsa <b>S</b> en {kind.mark_hint}{sides}. "
+            "<b>Retroceso</b> borra la marca más cercana y <b>Ctrl+Z</b> deshace. "
+            "Doble clic en una actividad: ir a su inicio."
+        )
+        color = event_color(kind.key)
+        self.video.set_event_type(kind.button_text, kind.sides, color)
+        self.tabs.setTabText(1, f"🔢 Conteo · {kind.name} ({len(times)})" if times else f"🔢 Conteo · {kind.name}")
+        if self.engine is None:
+            self.plots.set_events([], color)
+            self.events_table.setRowCount(0)
+            return
+        display = [float(t) for t in np.atleast_1d(self.engine.video_to_display(times))] if times else []
+        self.plots.set_events(display, color)
         phases = self._session_phases()
         names = self._activity_names()
-        self._step_counts = {}
+        self._event_counts = {}
         if display:
             labels = label_times(np.asarray(display, dtype=float), phases, names)
             for act, phase in zip(labels["activity_index"], labels["phase"]):
                 if _is_na(act):
                     continue
-                main, total = self._step_counts.get(int(act), (0, 0))
-                self._step_counts[int(act)] = (main + (phase == "activity_main"), total + 1)
-        table = self.steps_table
+                main, total = self._event_counts.get(int(act), (0, 0))
+                self._event_counts[int(act)] = (main + (phase == "activity_main"), total + 1)
+        steps = kind.key == STEPS
+        table = self.events_table
+        table.setHorizontalHeaderLabels(["Actividad", "En la actividad", "Con las fases quietas",
+                                         "Cadencia" if steps else "Por minuto", "Duración"])
         activities = self.engine.session.activities
         table.setRowCount(len(activities))
         for row, activity in enumerate(activities):
             index = activity.activity_index
             main_phases = phases[(phases["activity_index"] == index) & (phases["phase"] == "activity_main")] if phases is not None else []
             main_s = float((main_phases["end_s"] - main_phases["start_s"]).sum()) if len(main_phases) else activity.duration_seconds
-            n_main, n_all = self._step_counts.get(index, (0, 0))
-            cadence = f"{60.0 * n_main / main_s:.0f} pasos/min" if main_s > 0 and n_main else ""
+            n_main, n_all = self._event_counts.get(index, (0, 0))
+            rate = ""
+            if main_s > 0 and n_main:
+                rate = f"{60.0 * n_main / main_s:.0f} pasos/min" if steps else f"{60.0 * n_main / main_s:.1f}/min"
             item = readonly_item(names.get(index, ""), bold=bool(n_all))
             item.setData(Qt.UserRole, index)
             table.setItem(row, 0, item)
-            table.setItem(row, 1, readonly_item(str(n_main) if n_all else "", QColor("#4a148c"), bold=True))
+            table.setItem(row, 1, readonly_item(str(n_main) if n_all else "", QColor(color), bold=True))
             table.setItem(row, 2, readonly_item(str(n_all) if n_all else ""))
-            table.setItem(row, 3, readonly_item(cadence))
+            table.setItem(row, 3, readonly_item(rate))
             table.setItem(row, 4, readonly_item(f"{main_s:.0f} s"))
-        self.tabs.setTabText(1, f"👣 Pasos ({len(steps)})" if steps else "👣 Pasos")
         self._video_frame(self.video.current_time)
 
-    def _steps_row_clicked(self, row: int, _col: int) -> None:
-        item = self.steps_table.item(row, 0)
+    def _events_row_clicked(self, row: int, _col: int) -> None:
+        item = self.events_table.item(row, 0)
         if item is None or self.engine is None:
             return
         index = item.data(Qt.UserRole)
@@ -1180,19 +1685,23 @@ class MainWindow(QMainWindow):
             self.video.pause()
             self.video.seek(float(self.engine.display_to_video(start)))
 
-    def _steps_text(self, display: float) -> str:
-        """Steps so far and those of the activity on screen."""
-        if self.project is None or not self.project.steps or self.engine is None:
-            return "Pasos: ninguno todavía (S en cada apoyo del pie)"
+    def _events_text(self, display: float) -> str:
+        """Events so far of the kind being counted and those of the activity on screen."""
+        kind = self._event_kind()
+        if kind is None or self.engine is None:
+            return ""
+        n = len(self.project.events.get(kind.key, []))
+        if not n:
+            return f"{kind.name}: ninguno todavía (S en {kind.mark_hint})"
         phases = self._session_phases()
         if phases is None or not len(phases):
-            return f"Pasos: {len(self.project.steps)}"
+            return f"{kind.name}: {n}"
         here = label_times(np.asarray([display], dtype=float), phases, self._activity_names())
         index = here["activity_index"][0]
         if _is_na(index):
-            return f"Pasos: {len(self.project.steps)} en total"
-        main, total = self._step_counts.get(int(index), (0, 0))
-        return (f"Pasos: {len(self.project.steps)} en total · «{here['activity'][0]}»: "
+            return f"{kind.name}: {n} en total"
+        main, total = self._event_counts.get(int(index), (0, 0))
+        return (f"{kind.name}: {n} en total · «{here['activity'][0]}»: "
                 f"{main} en la actividad ({total} con las fases quietas)")
 
     # ==================================================================
@@ -1250,7 +1759,8 @@ class MainWindow(QMainWindow):
             found = match.found
             new = {e: t for e, t in found.items() if e not in self.project.video_events}
             self.project.video_events.update(new)
-            self._changed()
+            # Found on its own when the session opens: not the technician's work yet.
+            self._changed(None if auto else SYNC_TASK)
             kept = len(found) - len(new)
             msg = f"Audio: {len(found)} de {len(windows)} palmadas o saltos encontrados, {len(new)} añadidos"
             if kept:
@@ -1270,19 +1780,35 @@ class MainWindow(QMainWindow):
         self._run(lambda _p: find_audio_events(path, windows, expected_video_s=expected, search_s=search_s),
                   done, failed)
 
+    def export_folder(self) -> Path:
+        """saves_sync/<technician> in the session folder (saves_sync/ without technician)."""
+        base = Path(self.project.folder) / "saves_sync"
+        return base / self.project.technician if self.project.technician else base
+
     def export(self) -> None:
         if self.engine is None or not self.engine.signals:
             return
-        folder = str(Path(self.project.folder) / "saves_sync")
+        self._save_timer.stop()
+        self._save()
+        folder = str(self.export_folder())
+        pending = self.project.pending_tasks()
         box = QMessageBox(self)
         box.setWindowTitle("Exportar")
-        box.setText(f"Se exportará la sesión sincronizada y etiquetada en:\n{folder}")
+        text = f"Se exportará la sesión sincronizada y etiquetada en:\n{folder}"
+        if pending:
+            box.setIcon(QMessageBox.Warning)
+            lines = "\n".join(
+                f"• {self.project.task_name(k)}: {TASK_STATE_TEXT[self.project.task_state(k)].lower()}" for k in pending
+            )
+            text = (f"Faltan tareas por finalizar:\n{lines}\n\nSi exportas ahora, se anotará en tasks.csv "
+                    f"y en el LEEME.\n\n{text}")
+        box.setText(text)
         aligned = QCheckBox("Incluir también la grabación completa de cada sensor, alineada (archivos grandes)")
         box.setCheckBox(aligned)
-        export_button = box.addButton("Exportar", QMessageBox.AcceptRole)
+        export_button = box.addButton("Exportar igualmente" if pending else "Exportar", QMessageBox.AcceptRole)
         other_button = box.addButton("Otra carpeta…", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(export_button)
+        cancel_button = box.addButton("Cancelar", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button if pending else export_button)
         box.exec()
         if box.clickedButton() is other_button:
             folder = QFileDialog.getExistingDirectory(self, "Carpeta de resultados", str(self.project.folder))
@@ -1308,7 +1834,16 @@ class MainWindow(QMainWindow):
         self._run(lambda _p: engine.export(folder, export_aligned), done,
                   lambda e: QMessageBox.warning(self, "Exportar", f"No se pudo exportar:\n{e}"))
 
-    def _changed(self) -> None:
+    def _changed(self, task: Optional[str] = SYNC_TASK, message: str = "") -> None:  # noqa: UP045
+        """Something of the synchronization changed (``task``: the task it belongs to, if the technician did it)."""
+        timeout = 4000
+        if task is not None and self.project is not None and self.project.work_on(task) == "reopened":
+            message = (f"{message}. " if message else "") + (
+                f"La tarea «{self.project.task_name(task)}» vuelve a «Iniciada» porque has cambiado algo: "
+                "márcala como finalizada cuando termines")
+            timeout = 10000
+        if message:
+            self.statusBar().showMessage(message, timeout)
         if self.engine is not None:
             self.engine.refit()
         self._schedule_save()
@@ -1317,14 +1852,27 @@ class MainWindow(QMainWindow):
     def _schedule_save(self) -> None:
         self._save_timer.start()
 
-    def _save(self) -> None:
-        if self.project is not None:
-            try:
-                self.project.save()
-            except OSError as exc:
-                self.statusBar().showMessage(f"No se pudo guardar el proyecto: {exc}", 8000)
+    def save_now(self) -> None:
+        self._save_timer.stop()
+        if self._save():
+            self.statusBar().showMessage(f"Guardado en {self.project.project_path.name} (carpeta de la sesión)", 5000)
+
+    def _save(self) -> bool:
+        if self.project is None:
+            return False
+        try:
+            path = self.project.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"No se pudo guardar el proyecto: {exc}", 8000)
+            self.saved_label.setText("⚠ Sin guardar")
+            self.saved_label.setToolTip(str(exc))
+            return False
+        self.saved_label.setText(f"Guardado {datetime.now():%H:%M:%S}")
+        self.saved_label.setToolTip(str(path))
+        return True
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._save_timer.stop()
         self._save()
         self.video.close_video()
         super().closeEvent(event)

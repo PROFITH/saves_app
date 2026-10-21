@@ -28,10 +28,16 @@ def format_seconds(seconds: float) -> str:
     return f"{sign}{int(h):02d}:{int(m):02d}:{s:06.3f}"
 
 
+EVENT_BUTTON_STYLE = (
+    "QPushButton{{padding:6px; font-weight:bold; background:{color}; color:white; border-radius:4px;}}"
+    " QPushButton:disabled{{background:#b0a2b8;}}"
+)
+
+
 class VideoPanel(QWidget):
     frame_changed = Signal(float)   # video seconds of the frame on screen
     mark_requested = Signal()
-    step_requested = Signal(str)    # foot: "", "L" or "R"
+    event_requested = Signal(str)   # side: "", "L" or "R"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,25 +104,19 @@ class VideoPanel(QWidget):
         self.hint.setStyleSheet("color:#555;")
         layout.addWidget(self.hint)
 
-        steps = QHBoxLayout()
-        self.step_buttons = {}
-        for foot, text, tip in (
-            ("L", "👣 Izq. [A]", "Paso del pie izquierdo en el fotograma actual (A)"),
-            ("", "👣 Paso [S]", "Paso en el fotograma actual (S)"),
-            ("R", "👣 Der. [D]", "Paso del pie derecho en el fotograma actual (D)"),
-        ):
-            button = QPushButton(text)
-            button.setToolTip(tip)
+        events = QHBoxLayout()
+        self.event_buttons = {}
+        for side in ("L", "", "R"):
+            button = QPushButton()
             button.setFocusPolicy(Qt.NoFocus)
-            button.setStyleSheet("QPushButton{padding:6px; font-weight:bold; background:#6a1b9a; color:white; border-radius:4px;} QPushButton:disabled{background:#b0a2b8;}")
-            button.clicked.connect(lambda _=False, f=foot: self.step_requested.emit(f))
-            steps.addWidget(button)
-            self.step_buttons[foot] = button
-        layout.addLayout(steps)
-        self.steps_label = QLabel("")
-        self.steps_label.setWordWrap(True)
-        self.steps_label.setStyleSheet("color:#4a148c;")
-        layout.addWidget(self.steps_label)
+            button.clicked.connect(lambda _=False, s=side: self.event_requested.emit(s))
+            events.addWidget(button)
+            self.event_buttons[side] = button
+        layout.addLayout(events)
+        self.events_label = QLabel("")
+        self.events_label.setWordWrap(True)
+        layout.addWidget(self.events_label)
+        self.set_event_type("👣 Paso", sides=True, color="#6a1b9a")
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -131,7 +131,7 @@ class VideoPanel(QWidget):
         self.slider.setEnabled(enabled)
         self.speed_box.setEnabled(enabled)
         self.mark_button.setEnabled(enabled)
-        for button in self.step_buttons.values():
+        for button in self.event_buttons.values():
             button.setEnabled(enabled)
 
     def open(self, path: str) -> None:
@@ -158,8 +158,23 @@ class VideoPanel(QWidget):
     def set_host_text(self, text: str) -> None:
         self.host_label.setText(text)
 
-    def set_steps_text(self, text: str) -> None:
-        self.steps_label.setText(text)
+    def set_events_text(self, text: str) -> None:
+        self.events_label.setText(text)
+
+    def set_event_type(self, button: str, sides: bool, color: str) -> None:
+        """Buttons for the kind of event being counted (left and right if it has sides)."""
+        style = EVENT_BUTTON_STYLE.format(color=color)
+        texts = {
+            "L": ("Izq. [A]", f"{button}, lado izquierdo, en el fotograma actual (A)"),
+            "": (f"{button} [S]", f"{button} en el fotograma actual (S)"),
+            "R": ("Der. [D]", f"{button}, lado derecho, en el fotograma actual (D)"),
+        }
+        for side, widget in self.event_buttons.items():
+            widget.setText(texts[side][0])
+            widget.setToolTip(texts[side][1])
+            widget.setStyleSheet(style)
+            widget.setVisible(sides or side == "")
+        self.events_label.setStyleSheet(f"color:{color};")
 
     # ------------------------------------------------------------------
     # Navigation

@@ -181,3 +181,51 @@ def test_steps_marked_on_the_video_are_counted_per_activity(engine, tmp_path):
     assert per.loc[jog.activity_index, "cadence_steps_min"] == pytest.approx(15.0, abs=0.1)
     assert per.loc[jog.activity_index, "video_coverage_pct"] == pytest.approx(100.0)
     engine.project.steps = []
+
+
+def test_sit_to_stands_and_other_events_are_exported(engine, tmp_path):
+    import pandas as pd
+
+    from studio.engine import Affine
+
+    session = engine.session
+    chair = next(a for a in session.activities if a.activity_name == "Sentarse y levantarse 30 s")
+    origin = session.start_time.timestamp()
+    engine.video_fit = Affine(a=origin, b=1.0)
+    engine.video_duration_s = session.duration_seconds
+    start = chair.start_time.timestamp() - origin
+    engine.project.technician = "AB"
+    for k in range(14):
+        engine.project.add_event("sit_to_stand", start + 1.0 + 2.0 * k)
+    stairs = engine.project.add_event_type("Escalones", sides=True)
+    engine.project.add_event(stairs.key, start + 0.5, "L")
+    engine.project.set_task_state("sync", "finished")
+    try:
+        written = {p.relative_to(tmp_path).as_posix() for p in engine.export(tmp_path)}
+        assert {"events_sit_to_stand.csv", "events_sit_to_stand_per_activity.csv",
+                "events_escalones.csv", "tasks.csv"} <= written
+        assert "steps.csv" not in written  # nothing counted
+
+        stands = pd.read_csv(tmp_path / "events_sit_to_stand.csv")
+        assert list(stands.columns[:4]) == ["event", "video_seconds", "time_unix_ms", "time_utc"]
+        assert "side" not in stands.columns
+        assert set(stands["activity"]) == {"Sentarse y levantarse 30 s"}
+        per = pd.read_csv(tmp_path / "events_sit_to_stand_per_activity.csv").set_index("activity_index")
+        assert per.loc[chair.activity_index, "sit_to_stand_main"] == 14
+        assert "sit_to_stand_per_min" in per.columns
+        assert list(pd.read_csv(tmp_path / "events_escalones.csv", keep_default_na=False)["side"]) == ["L"]
+
+        activities = pd.read_csv(tmp_path / "activities.csv").set_index("activity_index")
+        assert activities.loc[chair.activity_index, "sit_to_stand_video"] == 14
+        tasks = pd.read_csv(tmp_path / "tasks.csv", keep_default_na=False)
+        assert list(tasks["task"]) == ["sync", "steps", "sit_to_stand", "escalones"]
+        assert list(tasks["state"]) == ["finished", "not_started", "not_started", "not_started"]
+        assert tasks.loc[0, "technician"] == "AB" and tasks.loc[0, "finished_at"]
+        readme = (tmp_path / "LEEME.txt").read_text(encoding="utf-8")
+        assert readme.startswith("Exportado el ") and "por el técnico AB" in readme
+        assert "Conteo de sentarse y levantarse (no iniciada)" in readme
+    finally:
+        engine.project.events = {}
+        engine.project.remove_event_type(stairs.key)
+        engine.project.tasks = {}
+        engine.project.technician = ""

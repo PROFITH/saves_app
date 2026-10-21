@@ -4,9 +4,10 @@ Synchronized dataset of a session: every sensor on one clock, labelled.
 After synchronizing, the export writes one file per sensor with its samples
 on the host clock of the protocol app and, for every sample, the activity,
 attempt and phase of the protocol; the activities and phases with their
-times; the steps counted on the video; and the heart rate of the Polar
-sensors with the same labels. Every file shares the time column
-``time_unix_ms`` (host clock), so they can be joined directly.
+times; the steps and any other events counted on the video; the
+technician's task checklist; and the heart rate of the Polar sensors with
+the same labels. Every file shares the time column ``time_unix_ms`` (host
+clock), so they can be joined directly.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import pandas as pd
+
+from studio.project import STEPS, SYNC_TASK, TASK_STATE_TEXT, SyncProject
 
 if TYPE_CHECKING:
     from studio.engine import SyncEngine
@@ -56,11 +59,27 @@ signals/<sensor>.csv.gz
 heart_rate/<dispositivo>.csv
     Frecuencia cardiaca y RR del Polar, con las mismas etiquetas.
 
-activities.csv   Actividades con su inicio y fin, MET, RPE y pasos.
+activities.csv   Actividades con su inicio y fin, MET, RPE y lo contado en
+                 el vídeo en cada una (steps_video, <tipo>_video).
 phases.csv       Cada fase de cada actividad con su inicio y fin.
-steps.csv        Pasos marcados en el vídeo (si se han contado).
+steps.csv        Pasos marcados en el vídeo (si se han contado), con el
+                 pie (foot: L izquierdo, R derecho, vacío si no se
+                 distinguió).
 steps_per_activity.csv
                  Pasos por actividad y cadencia (pasos/min).
+events_<tipo>.csv
+                 Otros eventos contados en el vídeo, uno por fila, con
+                 las mismas columnas que steps.csv (event en lugar de
+                 step y side en lugar de foot). Por ejemplo,
+                 events_sit_to_stand.csv: cada vez que se queda de pie
+                 en el test de sentarse y levantarse de 30 s.
+events_<tipo>_per_activity.csv
+                 Esos eventos por actividad: <tipo>_main (en la
+                 actividad), <tipo>_all_phases (con las fases quietas) y
+                 <tipo>_per_min (por minuto de actividad).
+tasks.csv        Tareas del técnico: la sincronización y cada conteo, con
+                 su estado (not_started no iniciada, started iniciada,
+                 finished finalizada), quién la hizo y cuándo.
 sync_report.csv  Calidad de la sincronización de cada sensor.
 anchors.csv      Palmadas y saltos encontrados en cada sensor.
 qc.json          Todos los ajustes (desfase, deriva, error) en detalle.
@@ -219,19 +238,63 @@ def export_dataset(engine: SyncEngine, out_dir: str | Path, margin_s: float = EX
     written.append(out / "phases.csv")
     phase_rows.to_csv(written[-1], index=False)
 
-    steps = step_table(engine, phases, names)
-    if len(steps):
-        written.append(out / "steps.csv")
-        steps.to_csv(written[-1], index=False)
-        written.append(out / "steps_per_activity.csv")
-        steps_per_activity(engine, steps, phases, names).to_csv(written[-1], index=False)
+    counted = {}
+    for kind in engine.project.event_types:
+        table = event_table(engine, kind.key, phases, names)
+        if not len(table):
+            continue
+        counted[kind.key] = table
+        stem = "steps" if kind.key == STEPS else f"events_{_safe(kind.key)}"
+        written.append(out / f"{stem}.csv")
+        table.to_csv(written[-1], index=False)
+        written.append(out / f"{stem}_per_activity.csv")
+        events_per_activity(engine, kind.key, table, phases, names).to_csv(written[-1], index=False)
 
     written.append(out / "activities.csv")
-    activity_table(engine, folder, steps).to_csv(written[-1], index=False)
+    activity_table(engine, folder, counted).to_csv(written[-1], index=False)
+
+    written.append(out / "tasks.csv")
+    task_table(engine.project).to_csv(written[-1], index=False)
 
     written.append(out / "LEEME.txt")
-    written[-1].write_text(README, encoding="utf-8")
+    written[-1].write_text(readme(engine.project), encoding="utf-8")
     return written
+
+
+def readme(project: SyncProject) -> str:
+    """The guide to the files, headed by who exported them and what was left."""
+    head = f"Exportado el {datetime.now().astimezone():%Y-%m-%d %H:%M}"
+    if project.technician:
+        head += f" por el técnico {project.technician}"
+    head += ".\n"
+    pending = project.pending_tasks()
+    if pending:
+        head += "Tareas sin finalizar al exportar: " + "; ".join(
+            f"{project.task_name(k)} ({TASK_STATE_TEXT[project.task_state(k)].lower()})" for k in pending
+        ) + ".\n"
+    else:
+        head += "Todas las tareas estaban finalizadas.\n"
+    return f"{head}\n{README}"
+
+
+def task_table(project: SyncProject) -> pd.DataFrame:
+    """The technician's checklist: one row per task."""
+    rows = []
+    for key in project.task_keys():
+        task = project.tasks.get(key, {})
+        state = project.task_state(key)
+        rows.append({
+            "task": key,
+            "name": project.task_name(key),
+            "state": state,
+            "state_label": TASK_STATE_TEXT[state],
+            "technician": task.get("by", "") if state != "not_started" else "",
+            "started_at": task.get("started_at", ""),
+            "finished_at": task.get("finished_at", ""),
+            "events": "" if key == SYNC_TASK else len(project.events.get(key, [])),
+            "copied_from": task.get("copied_from", ""),
+        })
+    return pd.DataFrame(rows)
 
 
 def _safe(text: str) -> str:
@@ -269,35 +332,60 @@ def _export_heart_rate(folder: Path, out: Path, phases, names, start: float, end
     return written
 
 
-def step_table(engine: SyncEngine, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
-    """Steps marked on the video, on the host clock and labelled."""
-    columns = ["step", "video_seconds", "time_unix_ms", "time_utc", "foot",
+def _event_columns(project: SyncProject, key: str) -> tuple[str, Optional[str]]:  # noqa: UP045
+    """Names of the number and side columns of a kind of event (side None if it has none)."""
+    if key == STEPS:
+        return "step", "foot"
+    try:
+        sides = project.event_type(key).sides
+    except KeyError:
+        sides = False
+    return "event", ("side" if sides else None)
+
+
+def event_table(engine: SyncEngine, key: str, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
+    """Events of one kind marked on the video, on the host clock and labelled."""
+    number, side = _event_columns(engine.project, key)
+    columns = [number, "video_seconds", "time_unix_ms", "time_utc", *([side] if side else []),
                "activity_index", "activity", "attempt", "phase"]
-    steps = engine.project.steps
-    if not steps:
+    events = engine.project.events.get(key, [])
+    if not events:
         return pd.DataFrame(columns=columns)
-    video = np.array([s["video_s"] for s in steps], dtype=float)
-    host = np.asarray(engine.video_to_display(video), dtype=float)
+    video = np.array([e["video_s"] for e in events], dtype=float)
+    host = np.atleast_1d(np.asarray(engine.video_to_display(video), dtype=float))
     frame = pd.DataFrame({
-        "step": np.arange(1, video.size + 1),
+        number: np.arange(1, video.size + 1),
         "video_seconds": np.round(video, 4),
         "time_unix_ms": np.round(host * 1000.0).astype(np.int64),
         "time_utc": [_iso(t) for t in host],
-        "foot": [s.get("foot", "") for s in steps],
+        **({side: [e.get("side", "") for e in events]} if side else {}),
         **label_times(host, phases, names),
     })
     return frame[columns]
 
 
-def steps_per_activity(engine: SyncEngine, steps: pd.DataFrame, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
-    """Steps of each activity (main phase and all its phases) and cadence."""
+def step_table(engine: SyncEngine, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
+    """Steps marked on the video, on the host clock and labelled."""
+    return event_table(engine, STEPS, phases, names)
+
+
+def _count_columns(key: str) -> tuple[str, str, str]:
+    if key == STEPS:
+        return "steps_main", "steps_all_phases", "cadence_steps_min"
+    return f"{key}_main", f"{key}_all_phases", f"{key}_per_min"
+
+
+def events_per_activity(engine: SyncEngine, key: str, events: pd.DataFrame, phases: pd.DataFrame,
+                        names: dict[int, str]) -> pd.DataFrame:
+    """Events of each activity (main phase and all its phases) and their rate per minute."""
+    main_col, all_col, rate_col = _count_columns(key)
     video_range = engine.video_display_range()
     rows = []
     for activity in engine.session.activities:
         index = activity.activity_index
         main = phases[(phases["activity_index"] == index) & (phases["phase"] == "activity_main")]
         main_s = float((main["end_s"] - main["start_s"]).sum()) if len(main) else activity.duration_seconds
-        in_activity = steps[steps["activity_index"] == index]
+        in_activity = events[events["activity_index"] == index]
         in_main = in_activity[in_activity["phase"] == "activity_main"]
         covered = None
         if video_range is not None and len(main):
@@ -309,17 +397,22 @@ def steps_per_activity(engine: SyncEngine, steps: pd.DataFrame, phases: pd.DataF
         rows.append({
             "activity_index": index,
             "activity": names.get(index, ""),
-            "steps_main": int(len(in_main)),
-            "steps_all_phases": int(len(in_activity)),
+            main_col: int(len(in_main)),
+            all_col: int(len(in_activity)),
             "main_duration_s": round(main_s, 3),
-            "cadence_steps_min": round(60.0 * len(in_main) / main_s, 1) if main_s > 0 else None,
+            rate_col: round(60.0 * len(in_main) / main_s, 1) if main_s > 0 else None,
             "video_coverage_pct": covered,
         })
     return pd.DataFrame(rows)
 
 
-def activity_table(engine: SyncEngine, folder: Path, steps: pd.DataFrame) -> pd.DataFrame:
-    """Activities with their times, the timer's markers and the steps."""
+def steps_per_activity(engine: SyncEngine, steps: pd.DataFrame, phases: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
+    """Steps of each activity (main phase and all its phases) and cadence."""
+    return events_per_activity(engine, STEPS, steps, phases, names)
+
+
+def activity_table(engine: SyncEngine, folder: Path, counted: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Activities with their times, the timer's markers and the events counted on the video."""
     rows = []
     for a in engine.session.activities:
         rows.append({
@@ -347,7 +440,8 @@ def activity_table(engine: SyncEngine, folder: Path, steps: pd.DataFrame) -> pd.
         if "activity_index" in markers.columns and extra:
             last = markers.drop_duplicates("activity_index", keep="last")[["activity_index", *extra]]
             frame = frame.merge(last, on="activity_index", how="left")
-    if len(steps) and len(frame):
-        main = steps[steps["phase"] == "activity_main"].groupby("activity_index").size()
-        frame["steps_video"] = [int(main.get(i, 0)) for i in frame["activity_index"]]
+    for key, events in counted.items():
+        if len(events) and len(frame):
+            main = events[events["phase"] == "activity_main"].groupby("activity_index").size()
+            frame[f"{key}_video"] = [int(main.get(i, 0)) for i in frame["activity_index"]]
     return frame

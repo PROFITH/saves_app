@@ -4,7 +4,9 @@ Stacked signal plots sharing one time axis (the host clock).
 Each sensor is drawn in the reference timeline using its current fit, so
 after synchronizing, the same clap lines up vertically across sensors. Only
 the points needed for the visible range are drawn (min/max pyramid), which
-keeps zooming and panning fluid with week-long recordings.
+keeps zooming and panning fluid with week-long recordings. The technician
+can hide the plots that do not help the task at hand (they still take part
+in the synchronization).
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ ANCHOR_PENS = {
     "excluded": pg.mkPen("#9e9e9e", width=1, style=Qt.DashLine),
 }
 ACTIVITY_BRUSHES = [QColor(255, 193, 7, 28), QColor(0, 150, 136, 28), QColor(156, 39, 176, 24), QColor(3, 169, 244, 26)]
+EVENT_COLORS = {"steps": "#6a1b9a", "sit_to_stand": "#00838f"}
+OTHER_EVENT_COLOR = "#ad1457"
 
 pg.setConfigOptions(antialias=False, background="w", foreground="#333")
 
@@ -34,12 +38,17 @@ def sensor_color(index: int) -> str:
     return SENSOR_COLORS[index % len(SENSOR_COLORS)]
 
 
+def event_color(key: str) -> str:
+    return EVENT_COLORS.get(key, OTHER_EVENT_COLOR)
+
+
 class SignalStack(QWidget):
     clicked = Signal(float)                 # display time (s)
     anchor_moved = Signal(str, str, float)  # sensor_id, event_id, display time
     anchor_action = Signal(str, str, str)   # sensor_id, event_id, action
     add_anchor = Signal(str, str, float)    # sensor_id, event_id, display time
     range_changed = Signal(float, float)
+    plot_visibility = Signal(str, str)      # sensor_id, "hide" | "only"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,8 +59,9 @@ class SignalStack(QWidget):
         self.markers: dict[str, list] = {}
         self.cursors: dict[str, pg.InfiniteLine] = {}
         self.static_items: dict[str, list] = {}
-        self.step_ticks: dict[str, pg.VTickGroup] = {}
-        self._steps: list[float] = []
+        self.event_ticks: dict[str, pg.VTickGroup] = {}
+        self._events: list[float] = []
+        self._event_color = event_color("steps")
         self._updating_region = False
 
         layout = QVBoxLayout(self)
@@ -90,16 +100,23 @@ class SignalStack(QWidget):
         self.rebuild()
 
     def sensor_ids(self) -> list[str]:
+        """Sensors with a plot: those in the fit whose plot is not hidden."""
         if self.engine is None:
             return []
-        return self.engine.active_sensors()
+        hidden = set(self.engine.project.hidden_plots)
+        return [sid for sid in self.engine.active_sensors() if sid not in hidden]
 
     def rebuild(self) -> None:
         self.canvas.clear()
         self.plots, self.curves, self.markers, self.cursors, self.static_items = {}, {}, {}, {}, {}
-        self.step_ticks = {}
+        self.event_ticks = {}
         if self.engine is None:
             return
+        if self.engine.active_sensors() and not self.sensor_ids():
+            self.canvas.addLabel(
+                "Todos los gráficos están ocultos. Vuelve a mostrarlos en «👁 Gráficos» (barra de arriba).",
+                row=0, col=0, color="#555",
+            )
         first = None
         all_ids = [s.sensor_id for s in self.engine.project.sensors]
         for row, sid in enumerate(self.sensor_ids()):
@@ -131,10 +148,10 @@ class SignalStack(QWidget):
             cursor.setZValue(20)
             plot.addItem(cursor, ignoreBounds=True)
             self.cursors[sid] = cursor
-            ticks = pg.VTickGroup(self._steps, yrange=[0.86, 1.0], pen=pg.mkPen("#6a1b9a", width=2))
+            ticks = pg.VTickGroup(self._events, yrange=[0.86, 1.0], pen=pg.mkPen(self._event_color, width=2))
             ticks.setZValue(18)
             plot.addItem(ticks, ignoreBounds=True)
-            self.step_ticks[sid] = ticks
+            self.event_ticks[sid] = ticks
             if self.show_xyz:
                 self.curves[sid] = [plot.plot(pen=pg.mkPen(AXIS_COLORS[c], width=1)) for c in ("x", "y", "z")]
             else:
@@ -263,11 +280,15 @@ class SignalStack(QWidget):
                 items.append(line)
             self.markers[sid] = items
 
-    def set_steps(self, display_times: list[float]) -> None:
-        """Steps counted on the video, as short purple ticks at the top."""
-        self._steps = list(display_times)
-        for ticks in self.step_ticks.values():
-            ticks.setXVals(self._steps)
+    def set_events(self, display_times: list[float], color: str = EVENT_COLORS["steps"]) -> None:
+        """Events counted on the video (one kind), as short ticks at the top."""
+        self._events = list(display_times)
+        if color != self._event_color:
+            self._event_color = color
+            for ticks in self.event_ticks.values():
+                ticks.setPen(pg.mkPen(color, width=2))
+        for ticks in self.event_ticks.values():
+            ticks.setXVals(self._events)
 
     def set_xyz(self, enabled: bool) -> None:
         self.show_xyz = enabled
@@ -341,22 +362,25 @@ class SignalStack(QWidget):
         )
 
     def _context_menu(self, sid: str, x: float, screen_pos) -> None:
-        window = self._nearest_window(x)
-        if window is None:
-            return
-        eid = window.event_id
-        state = self.engine.anchor_state(sid, eid)
         menu = QMenu(self)
-        kind = "el salto" if window.sync_kind == "jump" else "la palmada"
-        menu.addAction(f"Poner aquí {kind} {eid} de {sid}", lambda: self.add_anchor.emit(sid, eid, x))
-        if state in ("auto", "manual"):
-            menu.addAction(f"Excluir {eid} del ajuste de {sid}", lambda: self.anchor_action.emit(sid, eid, "exclude"))
-        if state == "excluded":
-            menu.addAction(f"Volver a incluir {eid}", lambda: self.anchor_action.emit(sid, eid, "include"))
-        if state == "manual":
-            menu.addAction(f"Volver a la detección automática de {eid}", lambda: self.anchor_action.emit(sid, eid, "auto"))
-        menu.addSeparator()
-        menu.addAction(f"Ir a la ventana {eid}", lambda: self.anchor_action.emit(sid, eid, "focus"))
+        window = self._nearest_window(x)
+        if window is not None:
+            eid = window.event_id
+            state = self.engine.anchor_state(sid, eid)
+            kind = "el salto" if window.sync_kind == "jump" else "la palmada"
+            menu.addAction(f"Poner aquí {kind} {eid} de {sid}", lambda: self.add_anchor.emit(sid, eid, x))
+            if state in ("auto", "manual"):
+                menu.addAction(f"Excluir {eid} del ajuste de {sid}", lambda: self.anchor_action.emit(sid, eid, "exclude"))
+            if state == "excluded":
+                menu.addAction(f"Volver a incluir {eid}", lambda: self.anchor_action.emit(sid, eid, "include"))
+            if state == "manual":
+                menu.addAction(f"Volver a la detección automática de {eid}", lambda: self.anchor_action.emit(sid, eid, "auto"))
+            menu.addSeparator()
+            menu.addAction(f"Ir a la ventana {eid}", lambda: self.anchor_action.emit(sid, eid, "focus"))
+            menu.addSeparator()
+        menu.addAction(f"Ocultar el gráfico de {sid}", lambda: self.plot_visibility.emit(sid, "hide"))
+        if len(self.plots) > 1:
+            menu.addAction(f"Ver solo el gráfico de {sid}", lambda: self.plot_visibility.emit(sid, "only"))
         menu.exec(screen_pos.toPoint())
 
     def _marker_moved(self, line) -> None:

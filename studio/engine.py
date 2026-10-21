@@ -591,6 +591,10 @@ class SyncEngine:
 
         qc = {
             "session_id": self.session.session_id,
+            "technician": self.project.technician,
+            "tasks": {k: {"state": self.project.task_state(k), **self.project.tasks.get(k, {})}
+                      for k in self.project.task_keys()},
+            "events_counted": {k.key: len(self.project.events.get(k.key, [])) for k in self.project.event_types},
             "reference": self.resolved_reference(),
             "reference_label": self.reference_label(),
             "reference_host_fit": (
