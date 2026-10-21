@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from algorithms.offset_search import OffsetSearch, estimate_offset, search_range_for
 from models import Session, SyncAnchor
 from pipeline.sync_report import (
     SensorSyncResult,
@@ -46,17 +47,31 @@ def analyze_signal(
     signal: SignalData,
     pad_seconds: float = 2.0,
     min_prominence: float = 1.0,
-) -> tuple[dict[str, SyncAnchor], dict]:
-    """Claps per sync window and session coverage of one signal (thread-safe)."""
-    start = session.start_time.timestamp() * 1000.0 - CROP_MARGIN_S * 1000.0
-    end = session.end_time.timestamp() * 1000.0 + CROP_MARGIN_S * 1000.0
+) -> tuple[dict[str, SyncAnchor], dict, OffsetSearch]:
+    """
+    Sync events per window, session coverage and coarse clock offset of one
+    signal (thread-safe).
+
+    The offset is searched first over the session plus a couple of hours on
+    each side, so a clock that is far off still finds its claps and jumps.
+    """
+    session_start = session.start_time.timestamp() * 1000.0
+    session_end = session.end_time.timestamp() * 1000.0
+    search_s = search_range_for(signal.sensor_type)
+    i0 = int(np.searchsorted(signal.t_ms, session_start - (search_s + 60.0) * 1000.0))
+    i1 = int(np.searchsorted(signal.t_ms, session_end + (search_s + 60.0) * 1000.0, side="right"))
+    search = estimate_offset(session, signal.t_ms[i0:i1], signal.channels["vm"][i0:i1], search_s)
+    offset_ms = search.offset_ms if search.accepted else 0.0
+
+    start = session_start + offset_ms - CROP_MARGIN_S * 1000.0
+    end = session_end + offset_ms + CROP_MARGIN_S * 1000.0
     recording = signal.to_recording(start, end)
     if len(recording.data) < 3:
         empty = {"session_seconds": session.duration_seconds, "covered_seconds": 0.0,
                  "coverage_pct": 0.0, "n_gaps": 0, "longest_gap_seconds": 0.0}
-        return {}, empty
-    anchors = detect_anchors(session, recording, pad_seconds, min_prominence)
-    return {a.event_id: a for a in anchors}, coverage_metrics(session, recording)
+        return {}, empty, search
+    anchors = detect_anchors(session, recording, pad_seconds, min_prominence, offset_ms)
+    return {a.event_id: a for a in anchors}, coverage_metrics(session, recording, offset_ms), search
 
 
 @dataclass
@@ -98,8 +113,12 @@ class SyncEngine:
         self.signals: dict[str, SignalData] = {}
         self.auto_anchors: dict[str, dict[str, SyncAnchor]] = {}
         self.coverage: dict[str, dict] = {}
+        self.offset_searches: dict[str, OffsetSearch] = {}
         self.fits: dict[str, Optional[dict]] = {}  # noqa: UP045
         self.video_fit: Optional[Affine] = None  # noqa: UP045
+        # Offline reference sensor -> host clock (from the cues), when no
+        # Polar caught the events.
+        self.reference_host_fit: Optional[Affine] = None  # noqa: UP045
         self.video_fit_source = "none"
         self.min_prominence = 1.0
         self.pad_seconds = 2.0
@@ -117,18 +136,29 @@ class SyncEngine:
         self.auto_anchors.pop(sensor_id, None)
         self.coverage.pop(sensor_id, None)
         self.fits.pop(sensor_id, None)
+        self.offset_searches.pop(sensor_id, None)
 
     def detect(self, sensor_id: str) -> None:
-        """Detect the claps of one sensor in every sync window."""
-        anchors, coverage = analyze_signal(self.session, self.signals[sensor_id], self.pad_seconds, self.min_prominence)
-        self.auto_anchors[sensor_id] = anchors
-        self.coverage[sensor_id] = coverage
+        """Detect the claps and jumps of one sensor in every sync window."""
+        anchors, coverage, search = analyze_signal(
+            self.session, self.signals[sensor_id], self.pad_seconds, self.min_prominence
+        )
+        self.ingest(sensor_id, self.signals[sensor_id], anchors, coverage, search)
 
-    def ingest(self, sensor_id: str, signal: SignalData, anchors: dict[str, SyncAnchor], coverage: dict) -> None:
+    def ingest(
+        self,
+        sensor_id: str,
+        signal: SignalData,
+        anchors: dict[str, SyncAnchor],
+        coverage: dict,
+        search: Optional[OffsetSearch] = None,  # noqa: UP045
+    ) -> None:
         """Store a signal analysed elsewhere (in a background thread)."""
         self.signals[sensor_id] = signal
         self.auto_anchors[sensor_id] = anchors
         self.coverage[sensor_id] = coverage
+        if search is not None:
+            self.offset_searches[sensor_id] = search
 
     def detect_all(self) -> None:
         for sensor_id in self.signals:
@@ -196,23 +226,56 @@ class SyncEngine:
             return VIDEO if len(self.project.video_events) >= 2 else None
         if ref != "auto":
             return ref if ref in active else None
-        # Prefer a live sensor already on the host clock (Polar).
-        for sid in active:
-            if self.signals[sid].sensor_type == "polar_acc":
-                return sid
+        # Prefer a live sensor already on the host clock (Polar): the one
+        # that caught the most events, the chest strap on a tie.
+        host = [sid for sid in self.host_clock_sensors() if len(self.effective_anchors(sid)) >= 2]
+        if host:
+            return max(host, key=lambda sid: (len(self.effective_anchors(sid)), sid == "polar_h10"))
         if len(self.project.video_events) >= 2:
             return VIDEO
         if not active:
             return None
+        # No Polar caught the events (claps barely move the chest strap): the
+        # sensor with the most events, put on the host clock by the cues.
         return max(active, key=lambda sid: len(self.effective_anchors(sid)))
 
+    def host_clock_sensors(self) -> list[str]:
+        """Active sensors recorded by the protocol app (on the host clock)."""
+        return [sid for sid in self.active_sensors() if self.signals[sid].sensor_type == "polar_acc"]
+
     def reference_seconds(self) -> dict[str, float]:
+        """
+        Host time of each event in the reference timeline.
+
+        With an automatic reference on the host clock, events the reference
+        missed are taken from the other host-clock sensors (a clap barely
+        moves the chest strap, but the arm band catches it).
+        """
         ref = self.resolved_reference()
         if ref is None:
             return {}
         if ref == VIDEO:
             return dict(self.project.video_events)
-        return {a.event_id: a.sensor_timestamp_unix_ms / 1000.0 for a in self.effective_anchors(ref)}
+        seconds = {a.event_id: a.sensor_timestamp_unix_ms / 1000.0 for a in self.effective_anchors(ref)}
+        if self.project.reference == "auto" and ref in self.host_clock_sensors():
+            for sid in self.host_clock_sensors():
+                if sid == ref:
+                    continue
+                for anchor in self.effective_anchors(sid):
+                    seconds.setdefault(anchor.event_id, anchor.sensor_timestamp_unix_ms / 1000.0)
+        return seconds
+
+    def reference_label(self) -> str:
+        """Name of the reference, with the host-clock sensors that fill it."""
+        ref = self.resolved_reference()
+        if ref is None:
+            return "ninguna"
+        if ref == VIDEO:
+            return "vídeo"
+        if ref not in self.host_clock_sensors():
+            return ref + (" (a la hora de los avisos)" if self.reference_host_fit is not None else "")
+        extra = [sid for sid in self.host_clock_sensors() if sid != ref] if self.project.reference == "auto" else []
+        return ref + (f" (+ {', '.join(extra)})" if extra else "")
 
     def refit(self) -> None:
         """Fit every sensor against the reference and the video to the host clock."""
@@ -228,7 +291,36 @@ class SyncEngine:
             except (np.linalg.LinAlgError, ValueError):
                 # Degenerate claps (e.g. the same impact found in two windows).
                 self.fits[sid] = None
+        self.reference_host_fit = self._fit_reference_to_host(ref)
         self._fit_video(ref)
+
+    def _fit_reference_to_host(self, ref: Optional[str]) -> Optional[Affine]:  # noqa: UP045
+        """
+        Host time of an offline reference sensor, from the cues of the timer.
+
+        The participant claps or lands a fixed delay after the go of each cue
+        (give or take a reaction time), so fitting the reference's events to
+        the cue times places its clock on the host clock within about a tenth
+        of a second. The other sensors are fitted to the reference itself, so
+        they stay aligned with each other to the millisecond.
+        """
+        if ref is None or ref == VIDEO or ref in self.host_clock_sensors():
+            return None
+        pairs = []
+        for anchor in self.effective_anchors(ref):
+            window = self._window(anchor.event_id)
+            if window is not None and window.expected_time is not None:
+                pairs.append((anchor.sensor_timestamp_unix_ms / 1000.0, window.expected_time.timestamp()))
+        if len(pairs) >= 2:
+            sensor = np.array([p[0] for p in pairs])
+            host = np.array([p[1] for p in pairs])
+            origin = float(sensor[0])
+            # Slope 1: the cues are too noisy to tell a drift of a few ppm.
+            return Affine(a=float(np.mean(host - (sensor - origin))), b=1.0, source_origin=origin)
+        search = self.offset_searches.get(ref)
+        if search is not None and search.accepted:
+            return Affine(a=-search.offset_ms / 1000.0, b=1.0)
+        return None
 
     def _video_start(self) -> Optional[float]:  # noqa: UP045
         if self.project.videos and self.project.videos[0].recording_start_unix_s is not None:
@@ -284,29 +376,52 @@ class SyncEngine:
     # Clock mapping
     # ------------------------------------------------------------------
 
+    def _reference_to_display(self, seconds):
+        """Reference timeline (s) -> display time (host Unix s)."""
+        ref = self.resolved_reference()
+        if ref == VIDEO and self.video_fit is not None:
+            return self.video_fit(seconds)
+        if self.reference_host_fit is not None and ref is not None and ref != VIDEO:
+            return self.reference_host_fit(seconds)
+        return seconds
+
+    def _display_to_reference(self, display_s):
+        ref = self.resolved_reference()
+        if ref == VIDEO and self.video_fit is not None:
+            return self.video_fit.inverse(display_s)
+        if self.reference_host_fit is not None and ref is not None and ref != VIDEO:
+            return self.reference_host_fit.inverse(display_s)
+        return display_s
+
+    def _coarse_offset_s(self, sensor_id: str) -> float:
+        search = self.offset_searches.get(sensor_id)
+        return search.offset_ms / 1000.0 if search is not None and search.accepted else 0.0
+
     def sensor_to_display(self, sensor_id: str, t_ms):
         """Native sensor time (Unix ms) -> display time (host Unix s)."""
         seconds = np.asarray(t_ms, dtype=float) / 1000.0
         fit = self.fits.get(sensor_id)
         if fit is None:
-            return seconds
+            if sensor_id == self.resolved_reference():
+                return self._reference_to_display(seconds)
+            # Not synchronized yet: at least without the coarse offset.
+            return seconds - self._coarse_offset_s(sensor_id)
         mapped = fit["reference_origin_seconds"] + fit["intercept_seconds"] + fit["slope"] * (
             seconds - fit["sensor_origin_unix_seconds"]
         )
-        if self.resolved_reference() == VIDEO and self.video_fit is not None:
-            return self.video_fit(mapped)
-        return mapped
+        return self._reference_to_display(mapped)
 
     def display_to_sensor(self, sensor_id: str, display_s):
         """Display time (host Unix s) -> native sensor time (Unix ms)."""
         display_s = np.asarray(display_s, dtype=float)
         fit = self.fits.get(sensor_id)
         if fit is None:
-            return display_s * 1000.0
-        if self.resolved_reference() == VIDEO and self.video_fit is not None:
-            display_s = self.video_fit.inverse(display_s)
+            if sensor_id == self.resolved_reference():
+                return np.asarray(self._display_to_reference(display_s), dtype=float) * 1000.0
+            return (display_s + self._coarse_offset_s(sensor_id)) * 1000.0
+        reference = self._display_to_reference(display_s)
         seconds = fit["sensor_origin_unix_seconds"] + (
-            display_s - fit["reference_origin_seconds"] - fit["intercept_seconds"]
+            reference - fit["reference_origin_seconds"] - fit["intercept_seconds"]
         ) / fit["slope"]
         return seconds * 1000.0
 
@@ -317,14 +432,17 @@ class SyncEngine:
         return self.video_fit.inverse(display_s) if self.video_fit is not None else np.asarray(display_s, dtype=float)
 
     def display_time_of_anchor(self, event_id: str) -> Optional[float]:  # noqa: UP045
-        """Display time of a clap, taken from the reference sensor."""
+        """Display time of a clap or jump, taken from the reference timeline."""
         ref = self.resolved_reference()
         if ref is None or ref == VIDEO:
             return None
         anchor = None if self.project.is_excluded(ref, event_id) else self.anchor(ref, event_id)
-        if anchor is None:
-            return None
-        return float(self.sensor_to_display(ref, anchor.sensor_timestamp_unix_ms))
+        if anchor is not None:
+            return float(self.sensor_to_display(ref, anchor.sensor_timestamp_unix_ms))
+        if ref in self.host_clock_sensors():
+            # Filled in by another sensor on the host clock.
+            return self.reference_seconds().get(event_id)
+        return None
 
     def window_display_range(self, event_id: str) -> tuple[float, float]:
         window = self._window(event_id)
@@ -347,19 +465,25 @@ class SyncEngine:
         coverage = self.coverage.get(sensor_id, {})
         if sensor_id == ref:
             quality, note = "reference", "Referencia"
+            if self.reference_host_fit is not None:
+                note = ("Referencia llevada a la hora del ordenador con los avisos del cronómetro "
+                        "(± 0,1 s); los demás sensores quedan alineados con ella al milisegundo")
         elif fit is None:
             quality = "none"
-            note = "Menos de 2 palmadas compartidas con la referencia" if ref else "Sin referencia"
+            note = "Menos de 2 eventos (palmada o salto) compartidos con la referencia" if ref else "Sin referencia"
         else:
             rmse = fit["rmse_ms"]
             if fit["n_pairs"] < 3:
-                quality, note = "fair", "Solo 2 palmadas: no se puede comprobar el ajuste"
+                quality, note = "fair", "Solo 2 eventos: no se puede comprobar el ajuste"
             elif rmse <= GOOD_RMSE_MS:
                 quality, note = "good", ""
             elif rmse <= FAIR_RMSE_MS:
-                quality, note = "fair", "Revisa las palmadas con más residuo"
+                quality, note = "fair", "Revisa los eventos con más residuo"
             else:
-                quality, note = "poor", "Error alto: revisa las palmadas"
+                quality, note = "poor", "Error alto: revisa los eventos"
+        search = self.offset_searches.get(sensor_id)
+        if search is not None and search.accepted and abs(search.offset_ms) >= 5000:
+            note = (note + ". " if note else "") + f"Reloj desfasado {search.describe()}"
         return SensorStatus(
             sensor_id=sensor_id,
             n_windows=len(self.session.sync_windows),

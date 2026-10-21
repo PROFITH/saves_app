@@ -18,6 +18,7 @@ class SyncWindowExtractor:
         sensor_data: pd.DataFrame,
         timestamp_column: str = "timestamp_unix_ms",
         pad_seconds: float = 0.0,
+        offset_ms: float = 0.0,
     ) -> dict:
         """
         Extract samples falling inside each synchronization window.
@@ -37,6 +38,10 @@ class SyncWindowExtractor:
             Seconds added before and after each window. Offline sensor
             clocks are not exactly aligned with the protocol app clock, so
             a small margin keeps the clap inside the extracted samples.
+
+        offset_ms
+            Sensor clock minus host clock (estimated beforehand), added to
+            the window times.
 
         Returns
         -------
@@ -77,6 +82,7 @@ class SyncWindowExtractor:
                 window,
                 timestamp_column,
                 pad_seconds,
+                offset_ms,
             )
 
         return extracted_windows
@@ -87,6 +93,7 @@ class SyncWindowExtractor:
         window: SyncWindow,
         timestamp_column: str,
         pad_seconds: float = 0.0,
+        offset_ms: float = 0.0,
     ) -> pd.DataFrame:
         """
         Extract samples from one synchronization window.
@@ -94,8 +101,8 @@ class SyncWindowExtractor:
 
         # Convert manifest UTC timestamps to Unix milliseconds.
         pad_ms = pad_seconds * 1000.0
-        window_start_ms = window.window_start.timestamp() * 1000.0 - pad_ms
-        window_end_ms = window.window_end.timestamp() * 1000.0 + pad_ms
+        window_start_ms = window.window_start.timestamp() * 1000.0 - pad_ms + offset_ms
+        window_end_ms = window.window_end.timestamp() * 1000.0 + pad_ms + offset_ms
 
         mask = (
             (sensor_data[timestamp_column] >= window_start_ms)

@@ -77,11 +77,17 @@ def test_claps_outside_the_window_need_padding(session_files):
     # A device clock 7 s ahead pushes the last clap of each window out.
     recordings["wrist"].data["timestamp_unix_ms"] += 7000
 
-    narrow = synchronize_session(session, recordings, reference="h10", pad_seconds=0.0)
-    wide = synchronize_session(session, recordings, reference="h10", pad_seconds=8.0)
+    narrow = synchronize_session(session, recordings, reference="h10", pad_seconds=0.0, search_offset=False)
+    wide = synchronize_session(session, recordings, reference="h10", pad_seconds=8.0, search_offset=False)
 
     assert len(narrow["wrist"].anchors) < 4
     assert wide["wrist"].fit["offset_ms"] == pytest.approx(-7800, abs=10)
+
+    # The coarse offset search finds them without any padding.
+    searched = synchronize_session(session, recordings, reference="h10", pad_seconds=0.0)
+    assert searched["wrist"].offset_search.accepted
+    assert len(searched["wrist"].anchors) == 4
+    assert searched["wrist"].fit["offset_ms"] == pytest.approx(-7800, abs=10)
 
 
 def test_cli_writes_report_anchors_and_qc(session_files, tmp_path):

@@ -54,9 +54,15 @@ def body_signal(t: np.ndarray, seed: int, gain: float = 1.0, clap_ms: float = 12
             xyz[mask, 1] += gain * 0.5 * amp * np.sin(2 * phase + 0.7)
             xyz[mask, 2] += gain * 0.8 * amp * np.abs(np.sin(phase))
     for clap in CLAPS:
-        w = np.clip(1.0 - np.abs(t - clap) / (clap_ms / 1000.0), 0.0, None)
-        xyz[:, 0] += 4.5 * w
+        xyz[:, 0] += 4.5 * impact(t - clap, clap_ms / 1000.0)
     return xyz
+
+
+def impact(dt: np.ndarray, duration_s: float) -> np.ndarray:
+    """An impact that starts at dt = 0: a fast rise and a decay."""
+    rise = 0.15 * duration_s
+    after = np.maximum(dt - rise, 0.0)
+    return np.where(dt < 0, 0.0, np.where(dt < rise, dt / rise, np.exp(-after / duration_s)))
 
 
 def write_demo_manifest(path: Path) -> None:

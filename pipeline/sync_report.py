@@ -1,12 +1,15 @@
 """
 Headless synchronization of offline sensors against a reference timeline.
 
-For each sensor the synchronization claps are detected inside the windows
-logged by the protocol app, and an affine model (offset + drift) is fitted
-against the same claps in a reference timeline: another sensor (usually the
-Polar H10, whose timestamps are already mapped to the host clock) or manual
-video events. The residuals of that fit are the synchronization error
-reported for the session.
+For each sensor the synchronization events (claps or jumps) are detected
+inside the windows logged by the protocol app, and an affine model (offset +
+drift) is fitted against the same events in a reference timeline: another
+sensor (usually the Polar H10, whose timestamps are already mapped to the
+host clock) or manual video events. The residuals of that fit are the
+synchronization error reported for the session.
+
+Before that, a coarse offset of each sensor's clock is searched (up to a
+couple of hours), so a clock that is far off still finds its events.
 """
 
 from dataclasses import dataclass, field
@@ -16,10 +19,12 @@ import numpy as np
 import pandas as pd
 
 from algorithms.clap_detector import ClapDetector
+from algorithms.impulse import JumpDetector, add_onsets
+from algorithms.offset_search import OffsetSearch, estimate_offset, search_range_for
 from algorithms.sync_event_detector import SyncEventDetector
 from algorithms.sync_model import SyncModel
 from models import Session, SyncAnchor, SyncAnchorPair
-from readers.recording import TIMESTAMP_COLUMN, SensorRecording
+from readers.recording import MAGNITUDE_COLUMN, TIMESTAMP_COLUMN, SensorRecording
 from utils.sync_window_extractor import SyncWindowExtractor
 
 GAP_FACTOR = 3.0
@@ -36,6 +41,33 @@ class SensorSyncResult:
     fit: Optional[dict] = None  # noqa: UP045
     coverage: dict = field(default_factory=dict)
     note: str = ""
+    offset_search: Optional[OffsetSearch] = None  # noqa: UP045
+
+
+def estimate_recording_offset(
+    session: Session,
+    recording: SensorRecording,
+    max_offset_s: Optional[float] = None,  # noqa: UP045
+) -> OffsetSearch:
+    """Coarse offset of the recording's clock (sensor minus host, ms)."""
+    data = recording.data
+    return estimate_offset(
+        session,
+        data[TIMESTAMP_COLUMN].to_numpy(dtype=float),
+        data[MAGNITUDE_COLUMN].to_numpy(dtype=float),
+        search_range_for(recording.sensor_type) if max_offset_s is None else max_offset_s,
+    )
+
+
+def window_candidates(window, samples) -> dict:
+    """Candidates of one window with the detector of its kind of event."""
+    if window.sync_kind == "jump":
+        result = JumpDetector().detect(samples)
+        if result["candidates"]:
+            return result
+        # Nobody jumped (or the sensor missed the flight): any impact.
+    result = ClapDetector().detect(samples)
+    return add_onsets(result, samples, TIMESTAMP_COLUMN, MAGNITUDE_COLUMN)
 
 
 def detect_anchors(
@@ -43,16 +75,22 @@ def detect_anchors(
     recording: SensorRecording,
     pad_seconds: float = 2.0,
     min_prominence: float = 1.0,
+    offset_ms: float = 0.0,
 ) -> list[SyncAnchor]:
-    """Detect one synchronization anchor per window, when present."""
+    """
+    Detect one synchronization anchor per window, when present.
+
+    ``offset_ms`` (sensor clock minus host clock) moves the windows to the
+    sensor's clock.
+    """
     windows = SyncWindowExtractor().extract(
         session,
         recording.data,
         timestamp_column=TIMESTAMP_COLUMN,
         pad_seconds=pad_seconds,
+        offset_ms=offset_ms,
     )
 
-    clap_detector = ClapDetector()
     event_detector = SyncEventDetector(min_prominence=min_prominence)
 
     anchors = []
@@ -61,7 +99,9 @@ def detect_anchors(
         if samples is None or len(samples) < 3:
             continue
 
-        anchor = event_detector.detect(window, clap_detector.detect(samples))
+        expected = window.expected_time
+        expected_ms = expected.timestamp() * 1000.0 + offset_ms if expected is not None else None
+        anchor = event_detector.detect(window, window_candidates(window, samples), expected_ms)
         if anchor is not None:
             anchors.append(anchor)
 
@@ -123,16 +163,17 @@ def fit_against_reference(
     }
 
 
-def coverage_metrics(session: Session, recording: SensorRecording) -> dict:
+def coverage_metrics(session: Session, recording: SensorRecording, offset_ms: float = 0.0) -> dict:
     """
     Share of the session covered by samples and gaps in the recording.
 
     A gap is an interval between consecutive samples longer than
-    ``GAP_FACTOR`` times the nominal sampling interval.
+    ``GAP_FACTOR`` times the nominal sampling interval. ``offset_ms`` is the
+    sensor clock minus the host clock.
     """
     timestamps = recording.data[TIMESTAMP_COLUMN].to_numpy(dtype=float)
-    start_ms = session.start_time.timestamp() * 1000.0
-    end_ms = session.end_time.timestamp() * 1000.0
+    start_ms = session.start_time.timestamp() * 1000.0 + offset_ms
+    end_ms = session.end_time.timestamp() * 1000.0 + offset_ms
     session_ms = max(end_ms - start_ms, 0.0)
 
     inside = timestamps[(timestamps >= start_ms) & (timestamps <= end_ms)]
@@ -170,6 +211,7 @@ def synchronize_session(
     video_events: Optional[dict[str, float]] = None,  # noqa: UP045
     pad_seconds: float = 2.0,
     min_prominence: float = 1.0,
+    search_offset: bool = True,
 ) -> dict[str, SensorSyncResult]:
     """
     Detect anchors in every sensor and fit each one against the reference.
@@ -183,15 +225,20 @@ def synchronize_session(
     reference
         Sensor ID used as the reference timeline, or ``"video"`` to use
         ``video_events`` (event ID -> seconds from the start of the video).
+    search_offset
+        Look for a coarse clock offset of each sensor first.
     """
     results = {}
     for sensor_id, recording in recordings.items():
+        search = estimate_recording_offset(session, recording) if search_offset else None
+        offset_ms = search.offset_ms if search is not None and search.accepted else 0.0
         results[sensor_id] = SensorSyncResult(
             sensor_id=sensor_id,
             sensor_type=recording.sensor_type,
             sampling_rate_hz=recording.sampling_rate_hz,
-            anchors=detect_anchors(session, recording, pad_seconds, min_prominence),
-            coverage=coverage_metrics(session, recording),
+            anchors=detect_anchors(session, recording, pad_seconds, min_prominence, offset_ms),
+            coverage=coverage_metrics(session, recording, offset_ms),
+            offset_search=search,
         )
 
     if reference == "video":
@@ -279,6 +326,11 @@ def report_table(session: Session, results: dict[str, SensorSyncResult]) -> pd.D
             "coverage_pct": result.coverage.get("coverage_pct"),
             "n_gaps": result.coverage.get("n_gaps"),
             "longest_gap_seconds": result.coverage.get("longest_gap_seconds"),
+            "coarse_offset_ms": (
+                result.offset_search.offset_ms
+                if result.offset_search is not None and result.offset_search.accepted
+                else None
+            ),
             "note": result.note,
         })
 

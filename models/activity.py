@@ -16,3 +16,5 @@ class Activity:
     activity_name: Optional[str] = None  # noqa: UP045
     compendium_code: Optional[str] = None  # noqa: UP045
     planned_duration_seconds: Optional[float] = None  # noqa: UP045
+    met: Optional[float] = None  # noqa: UP045
+    rpe: Optional[float] = None  # noqa: UP045

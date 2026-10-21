@@ -482,12 +482,12 @@ class MainWindow(QMainWindow):
 
         def work(progress):
             signal = load_signal(entry.path, entry.sensor_format, project_folder, timezone, progress)
-            progress("Buscando palmadas")
             engine = self.engine
             if engine is None:
-                return signal, {}, {}
-            anchors, coverage = analyze_signal(engine.session, signal, engine.pad_seconds, engine.min_prominence)
-            return signal, anchors, coverage
+                return signal, {}, {}, None
+            progress("Buscando palmadas y saltos")
+            anchors, coverage, search = analyze_signal(engine.session, signal, engine.pad_seconds, engine.min_prominence)
+            return signal, anchors, coverage, search
 
         self._run(work, lambda result: self._sensor_loaded(sensor_id, result),
                   lambda error: self._sensor_failed(sensor_id, error),
@@ -498,8 +498,8 @@ class MainWindow(QMainWindow):
         self.loading[sensor_id] = "Buscando palmadas"
 
         def work(_progress):
-            anchors, coverage = analyze_signal(engine.session, signal, engine.pad_seconds, engine.min_prominence)
-            return signal, anchors, coverage
+            anchors, coverage, search = analyze_signal(engine.session, signal, engine.pad_seconds, engine.min_prominence)
+            return signal, anchors, coverage, search
 
         self._run(work, lambda result: self._sensor_loaded(sensor_id, result),
                   lambda error: self._sensor_failed(sensor_id, error))
@@ -530,8 +530,8 @@ class MainWindow(QMainWindow):
             self.project.sensor(sensor_id)
         except KeyError:
             return  # Removed while loading.
-        signal, anchors, coverage = result
-        self.engine.ingest(sensor_id, signal, anchors, coverage)
+        signal, anchors, coverage, search = result
+        self.engine.ingest(sensor_id, signal, anchors, coverage, search)
         self.engine.refit()
         self.refresh_all()
 

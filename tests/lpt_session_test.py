@@ -1,0 +1,124 @@
+"""SAVES on a session folder written by lab_protocol_timer, with simulated sensors."""
+
+import pytest
+
+from importers.manifest_importer import ManifestImporter
+from studio.discovery import discover
+from studio.engine import SyncEngine
+from studio.project import SyncProject
+from studio.signals import load_signal
+from tests.lpt_session import SENSORS, build_lpt_session, true_offsets_ms
+
+
+@pytest.fixture(scope="module")
+def folder(tmp_path_factory):
+    return build_lpt_session(tmp_path_factory.mktemp("lpt") / "R4H_001" / "D0")
+
+
+@pytest.fixture(scope="module")
+def engine(folder):
+    found = discover(folder)
+    project = SyncProject(folder=str(folder), manifest_path=found.manifest_path, videos=found.videos)
+    for entry in found.sensors:
+        project.add_sensor(entry)
+    session = ManifestImporter().load(project.manifest_path)
+    engine = SyncEngine(project, session)
+    for entry in project.sensors:
+        engine.set_signal(entry.sensor_id, load_signal(entry.path, entry.sensor_format, folder))
+    engine.refit()
+    return engine
+
+
+def test_manifest_carries_the_kind_and_cue_of_every_event(folder):
+    session = ManifestImporter().load(folder / "session_manifest.json")
+    kinds = [w.sync_kind for w in session.sync_windows]
+    assert kinds.count("jump") == 12 and kinds.count("clap") == 6
+    assert all(w.cue_time is not None for w in session.sync_windows)
+    assert session.activities[0].met == 1.0
+
+
+def test_files_match_the_sensors_of_the_manifest(folder):
+    found = discover(folder)
+    assert sorted(s.sensor_id for s in found.sensors) == sorted(SENSORS)
+    by_id = {s.sensor_id: s for s in found.sensors}
+    assert by_id["ax3_wnd"].location == "Muñeca no dominante"
+    assert by_id["sens_thigh"].location == "Muslo"
+    assert by_id["verity_arm"].location == "Brazo"
+
+
+def test_clock_offsets_up_to_two_hours_are_found(engine):
+    for sid, offset in true_offsets_ms().items():
+        search = engine.offset_searches[sid]
+        assert search.accepted, (sid, search.note)
+        assert search.offset_ms == pytest.approx(offset, abs=600), sid
+
+
+def test_every_offline_sensor_is_synchronized(engine):
+    ref = engine.resolved_reference()
+    assert ref in ("polar_h10", "verity_arm")
+    for sid in true_offsets_ms():
+        if sid in ("polar_h10", "verity_arm"):
+            continue
+        status = engine.status(sid)
+        assert status.quality == "good", (sid, status)
+        assert status.n_pairs >= 10, sid
+        assert status.rmse_ms < 25, sid
+        # offset_ms is reference minus sensor at the first shared event.
+        first = engine.fits[sid]["reference_origin_seconds"]
+        assert -status.offset_ms == pytest.approx(true_offsets_ms(first)[sid], abs=40), sid
+
+
+def test_jumps_are_anchored_at_the_landing(engine):
+    session = engine.session
+    jump = next(w for w in session.sync_windows if w.sync_kind == "jump")
+    times = {}
+    for sid in ("ax3_thigh", "ax3_wd", "polar_h10"):
+        anchor = engine.anchor(sid, jump.event_id)
+        assert anchor is not None, sid
+        assert anchor.selection_rule == "closest_to_cue"
+        times[sid] = float(engine.sensor_to_display(sid, anchor.sensor_timestamp_unix_ms))
+    assert max(times.values()) - min(times.values()) < 0.03
+
+
+def test_chest_strap_misses_claps_but_the_arm_band_fills_the_reference(engine):
+    windows = engine.session.sync_windows
+    claps = [w for w in windows if w.sync_kind == "clap"]
+    assert all(engine.anchor("polar_h10", w.event_id) is None for w in claps)
+    assert any(engine.anchor("verity_arm", w.event_id) is not None for w in claps)
+    # The reference holds every event caught by either Polar.
+    caught = {
+        w.event_id for w in windows
+        if any(engine.anchor(sid, w.event_id) is not None for sid in ("polar_h10", "verity_arm"))
+    }
+    assert caught <= set(engine.reference_seconds())
+
+
+def test_without_polar_an_offline_sensor_leads_on_the_cue_clock(folder):
+    found = discover(folder)
+    project = SyncProject(folder=str(folder), manifest_path=found.manifest_path)
+    for entry in found.sensors:
+        if entry.sensor_format != "polar_acc":
+            project.add_sensor(entry)
+    session = ManifestImporter().load(project.manifest_path)
+    engine = SyncEngine(project, session)
+    for entry in project.sensors:
+        engine.set_signal(entry.sensor_id, load_signal(entry.path, entry.sensor_format, folder))
+    engine.refit()
+
+    ref = engine.resolved_reference()
+    assert ref not in ("polar_h10", "verity_arm")
+    assert engine.reference_host_fit is not None
+    assert "avisos" in engine.reference_label()
+    # Every sensor lands on the host clock within the reaction-time error,
+    # and on each other within a few milliseconds.
+    jump = next(w for w in session.sync_windows if w.sync_kind == "jump")
+    times = []
+    for sid in engine.active_sensors():
+        anchor = engine.anchor(sid, jump.event_id)
+        if anchor is None:
+            continue
+        host = float(engine.sensor_to_display(sid, anchor.sensor_timestamp_unix_ms))
+        assert host == pytest.approx(jump.cue_time.timestamp() + 0.95, abs=0.35), sid
+        times.append(host)
+    assert len(times) >= 4
+    assert max(times) - min(times) < 0.04

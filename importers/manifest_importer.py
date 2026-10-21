@@ -106,7 +106,16 @@ class ManifestImporter:
             planned_duration_seconds=(
                 float(planned) if planned is not None else None
             ),
+            met=cls._optional_float(data.get("met")),
+            rpe=cls._optional_float(data.get("rpe")),
         )
+
+    @staticmethod
+    def _optional_float(value):
+        try:
+            return float(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def _parse_sync_window(cls, data: dict) -> SyncWindow:
@@ -127,6 +136,12 @@ class ManifestImporter:
                     data,
                     ("window_end_time_utc", "window_end"),
                 )
+            ),
+            sync_kind="jump" if data.get("sync_kind") == "jump" else "clap",
+            cue_time=(
+                cls._parse_datetime(data["cue_time_utc"])
+                if data.get("cue_time_utc")
+                else None
             ),
         )
 
