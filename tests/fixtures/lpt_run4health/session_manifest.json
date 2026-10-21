@@ -1,0 +1,397 @@
+{
+  "schema_version": "1.1",
+  "session_id": "session_1792543928998683",
+  "created_by": "lab_protocol_timer",
+  "session_start_time_utc": "2026-10-21T08:30:00.000Z",
+  "session_end_time_utc": "2026-10-21T09:15:10.000Z",
+  "protocol": {
+    "protocol_id": "run4health_base",
+    "protocol_version": "2"
+  },
+  "participants": [
+    {
+      "participant_id": "001",
+      "redcap_event_name": "da_0__visita_inici_arm_1"
+    }
+  ],
+  "activities": [
+    {
+      "activity_index": 1,
+      "activity_start_time_utc": "2026-10-21T08:30:30.000Z",
+      "activity_end_time_utc": "2026-10-21T08:35:30.000Z",
+      "duration_seconds": 300.0,
+      "activity_name": "Tumbado en reposo",
+      "compendium_code": "07011",
+      "planned_duration_seconds": 300,
+      "met": 1.0,
+      "rpe": 3
+    },
+    {
+      "activity_index": 2,
+      "activity_start_time_utc": "2026-10-21T08:36:35.000Z",
+      "activity_end_time_utc": "2026-10-21T08:40:35.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "De pie quieto",
+      "compendium_code": "07040",
+      "planned_duration_seconds": 240,
+      "met": 1.3,
+      "rpe": 3
+    },
+    {
+      "activity_index": 3,
+      "activity_start_time_utc": "2026-10-21T08:41:40.000Z",
+      "activity_end_time_utc": "2026-10-21T08:45:40.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "Sentado escribiendo en el ordenador",
+      "compendium_code": "09040",
+      "planned_duration_seconds": 240,
+      "met": 1.3,
+      "rpe": 3
+    },
+    {
+      "activity_index": 4,
+      "activity_start_time_utc": "2026-10-21T08:46:45.000Z",
+      "activity_end_time_utc": "2026-10-21T08:50:45.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "Caminar despacio con bolsas de la compra",
+      "compendium_code": "05054",
+      "planned_duration_seconds": 240,
+      "met": 3.5,
+      "rpe": 3
+    },
+    {
+      "activity_index": 5,
+      "activity_start_time_utc": "2026-10-21T08:51:50.000Z",
+      "activity_end_time_utc": "2026-10-21T08:55:50.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "Barrer",
+      "compendium_code": "05010",
+      "planned_duration_seconds": 240,
+      "met": 3.3,
+      "rpe": 3
+    },
+    {
+      "activity_index": 6,
+      "activity_start_time_utc": "2026-10-21T08:56:55.000Z",
+      "activity_end_time_utc": "2026-10-21T09:00:55.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "Subir escaleras",
+      "compendium_code": "17131",
+      "planned_duration_seconds": 240,
+      "met": 6.8,
+      "rpe": 3
+    },
+    {
+      "activity_index": 7,
+      "activity_start_time_utc": "2026-10-21T09:02:00.000Z",
+      "activity_end_time_utc": "2026-10-21T09:06:00.000Z",
+      "duration_seconds": 240.0,
+      "activity_name": "Trotar a ritmo propio",
+      "compendium_code": "12020",
+      "planned_duration_seconds": 240,
+      "met": 7.5,
+      "rpe": 3
+    },
+    {
+      "activity_index": 8,
+      "activity_start_time_utc": "2026-10-21T09:07:05.000Z",
+      "activity_end_time_utc": "2026-10-21T09:07:35.000Z",
+      "duration_seconds": 30.0,
+      "activity_name": "Sentarse y levantarse 30 s",
+      "compendium_code": "02344",
+      "planned_duration_seconds": 30,
+      "met": 4.0,
+      "rpe": 3
+    },
+    {
+      "activity_index": 9,
+      "activity_start_time_utc": "2026-10-21T09:08:40.000Z",
+      "activity_end_time_utc": "2026-10-21T09:14:40.000Z",
+      "duration_seconds": 360.0,
+      "activity_name": "Marcha de 6 minutos",
+      "compendium_code": "17220",
+      "planned_duration_seconds": 360,
+      "met": 5.5,
+      "rpe": 3
+    }
+  ],
+  "sync_windows": [
+    {
+      "event_id": "sync_1",
+      "event_type": "auto_sync",
+      "activity_index": 1,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:30:12.000Z",
+      "window_end_time_utc": "2026-10-21T08:30:22.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T08:30:15.000Z"
+    },
+    {
+      "event_id": "sync_2",
+      "event_type": "auto_sync",
+      "activity_index": 1,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T08:35:42.000Z",
+      "window_end_time_utc": "2026-10-21T08:35:52.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T08:35:45.000Z"
+    },
+    {
+      "event_id": "sync_3",
+      "event_type": "auto_sync",
+      "activity_index": 2,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:36:17.000Z",
+      "window_end_time_utc": "2026-10-21T08:36:27.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:36:20.000Z"
+    },
+    {
+      "event_id": "sync_4",
+      "event_type": "auto_sync",
+      "activity_index": 2,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T08:40:47.000Z",
+      "window_end_time_utc": "2026-10-21T08:40:57.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:40:50.000Z"
+    },
+    {
+      "event_id": "sync_5",
+      "event_type": "auto_sync",
+      "activity_index": 3,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:41:22.000Z",
+      "window_end_time_utc": "2026-10-21T08:41:32.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T08:41:25.000Z"
+    },
+    {
+      "event_id": "sync_6",
+      "event_type": "auto_sync",
+      "activity_index": 3,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T08:45:52.000Z",
+      "window_end_time_utc": "2026-10-21T08:46:02.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T08:45:55.000Z"
+    },
+    {
+      "event_id": "sync_7",
+      "event_type": "auto_sync",
+      "activity_index": 4,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:46:27.000Z",
+      "window_end_time_utc": "2026-10-21T08:46:37.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:46:30.000Z"
+    },
+    {
+      "event_id": "sync_8",
+      "event_type": "auto_sync",
+      "activity_index": 4,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T08:50:57.000Z",
+      "window_end_time_utc": "2026-10-21T08:51:07.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:51:00.000Z"
+    },
+    {
+      "event_id": "sync_9",
+      "event_type": "auto_sync",
+      "activity_index": 5,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:51:32.000Z",
+      "window_end_time_utc": "2026-10-21T08:51:42.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:51:35.000Z"
+    },
+    {
+      "event_id": "sync_10",
+      "event_type": "auto_sync",
+      "activity_index": 5,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T08:56:02.000Z",
+      "window_end_time_utc": "2026-10-21T08:56:12.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:56:05.000Z"
+    },
+    {
+      "event_id": "sync_11",
+      "event_type": "auto_sync",
+      "activity_index": 6,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T08:56:37.000Z",
+      "window_end_time_utc": "2026-10-21T08:56:47.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T08:56:40.000Z"
+    },
+    {
+      "event_id": "sync_12",
+      "event_type": "auto_sync",
+      "activity_index": 6,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T09:01:07.000Z",
+      "window_end_time_utc": "2026-10-21T09:01:17.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T09:01:10.000Z"
+    },
+    {
+      "event_id": "sync_13",
+      "event_type": "auto_sync",
+      "activity_index": 7,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T09:01:42.000Z",
+      "window_end_time_utc": "2026-10-21T09:01:52.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T09:01:45.000Z"
+    },
+    {
+      "event_id": "sync_14",
+      "event_type": "auto_sync",
+      "activity_index": 7,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T09:06:12.000Z",
+      "window_end_time_utc": "2026-10-21T09:06:22.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T09:06:15.000Z"
+    },
+    {
+      "event_id": "sync_15",
+      "event_type": "auto_sync",
+      "activity_index": 8,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T09:06:47.000Z",
+      "window_end_time_utc": "2026-10-21T09:06:57.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T09:06:50.000Z"
+    },
+    {
+      "event_id": "sync_16",
+      "event_type": "auto_sync",
+      "activity_index": 8,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T09:07:47.000Z",
+      "window_end_time_utc": "2026-10-21T09:07:57.000Z",
+      "sync_kind": "clap",
+      "cue_time_utc": "2026-10-21T09:07:50.000Z"
+    },
+    {
+      "event_id": "sync_17",
+      "event_type": "auto_sync",
+      "activity_index": 9,
+      "phase": "static_prep",
+      "window_start_time_utc": "2026-10-21T09:08:22.000Z",
+      "window_end_time_utc": "2026-10-21T09:08:32.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T09:08:25.000Z"
+    },
+    {
+      "event_id": "sync_18",
+      "event_type": "auto_sync",
+      "activity_index": 9,
+      "phase": "static_post",
+      "window_start_time_utc": "2026-10-21T09:14:52.000Z",
+      "window_end_time_utc": "2026-10-21T09:15:02.000Z",
+      "sync_kind": "jump",
+      "cue_time_utc": "2026-10-21T09:14:55.000Z"
+    }
+  ],
+  "video": {
+    "files": [],
+    "cameras": [
+      {
+        "camera_id": "cam_room",
+        "placement": "room",
+        "device_type": "camera",
+        "placement_label": "Fija en la sala"
+      }
+    ]
+  },
+  "sensors": {
+    "polar_h10": {
+      "present": true,
+      "timestamp_domain": "native_plus_host_utc",
+      "device_name": "Polar H10",
+      "placement": "chest",
+      "connection": "live",
+      "device_type": "polar_h10",
+      "placement_label": "Pecho"
+    },
+    "verity_arm": {
+      "present": true,
+      "timestamp_domain": "native_plus_host_utc",
+      "device_name": "Polar Verity Sense",
+      "placement": "upper_arm",
+      "connection": "live",
+      "device_type": "verity_sense",
+      "placement_label": "Brazo",
+      "free_living": true
+    },
+    "matrix_wnd": {
+      "present": true,
+      "timestamp_domain": "device_clock_utc",
+      "device_name": "Parmay Matrix",
+      "placement": "wrist",
+      "connection": "offline",
+      "device_type": "matrix",
+      "dominance": "non_dominant",
+      "placement_label": "Muñeca no dominante",
+      "free_living": true
+    },
+    "ax3_wnd": {
+      "present": true,
+      "timestamp_domain": "device_clock_local",
+      "device_name": "Axivity AX3",
+      "placement": "wrist",
+      "connection": "offline",
+      "device_type": "ax3",
+      "dominance": "non_dominant",
+      "placement_label": "Muñeca no dominante",
+      "sampling_rate_hz": 100.0,
+      "range_g": 8.0
+    },
+    "ax3_wd": {
+      "present": true,
+      "timestamp_domain": "device_clock_local",
+      "device_name": "Axivity AX3",
+      "placement": "wrist",
+      "connection": "offline",
+      "device_type": "ax3",
+      "dominance": "dominant",
+      "placement_label": "Muñeca dominante",
+      "sampling_rate_hz": 100.0,
+      "range_g": 8.0
+    },
+    "sens_thigh": {
+      "present": true,
+      "timestamp_domain": "device_clock_utc",
+      "device_name": "SENS motion",
+      "placement": "thigh",
+      "connection": "offline",
+      "device_type": "sens",
+      "placement_label": "Muslo",
+      "free_living": true
+    },
+    "ax3_thigh": {
+      "present": true,
+      "timestamp_domain": "device_clock_local",
+      "device_name": "Axivity AX3",
+      "placement": "thigh",
+      "connection": "offline",
+      "device_type": "ax3",
+      "placement_label": "Muslo",
+      "sampling_rate_hz": 100.0,
+      "range_g": 8.0
+    }
+  },
+  "status": "complete",
+  "operator": "Técnica",
+  "settings": {
+    "prep_seconds": 30,
+    "main_seconds": 600,
+    "post_seconds": 30,
+    "lap_mode": true,
+    "voice": true
+  }
+}

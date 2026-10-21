@@ -97,3 +97,7 @@ sync.xlsx
 qc.json
 # SAVES Studio caches and project files written next to the data
 .saves_cache/
+
+# Test fixtures: a session folder from a test run of lab_protocol_timer
+# (no participant data).
+!tests/fixtures/**
