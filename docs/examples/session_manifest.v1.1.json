@@ -53,8 +53,15 @@
       "present": true,
       "timestamp_domain": "native_plus_host_utc",
       "device_name": "Polar H10",
+      "type": "polar_h10",
       "placement": "chest",
-      "connection": "live"
+      "connection": "live",
+      "signals": ["acc", "ecg", "heart_rate", "rr"],
+      "files": [
+        "polar_acc_polar_h10_20261027_093000.csv",
+        "polar_ecg_polar_h10_20261027_093000.csv",
+        "polar_hr_polar_h10_20261027_093000.csv"
+      ]
     },
     "ax3_wrist_nd": {
       "present": true,

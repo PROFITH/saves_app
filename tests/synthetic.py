@@ -67,6 +67,16 @@ def _pack_dword(raw_xyz: np.ndarray) -> int:
     return value
 
 
+def _per_sector(values, k: int) -> int:
+    """The 10-bit reading of sector ``k``: 0 when not given, one value for all, or one per sector (cycled)."""
+    if values is None:
+        return 0
+    if np.isscalar(values):
+        return int(values) & 0x3FF
+    values = np.asarray(values)
+    return int(values[k % values.size]) & 0x3FF
+
+
 def write_cwa(
     path: Path,
     start_local: datetime,
@@ -77,6 +87,8 @@ def write_cwa(
     channels: int = 3,
     fractional: bool = False,
     corrupt_sectors: tuple[int, ...] = (),
+    light=None,
+    temperature_raw=None,
 ) -> np.ndarray:
     """
     Write a minimal but valid CWA file.
@@ -84,7 +96,9 @@ def write_cwa(
     ``values`` holds g for 3 channels or (gyro dps, accel g) for 6 channels.
     ``start_local`` is the naive local time of the first sample; samples are
     spaced at ``true_frequency`` (defaults to ``frequency``) so that clock
-    drift between the nominal and actual rate can be simulated.
+    drift between the nominal and actual rate can be simulated. ``light``
+    and ``temperature_raw`` are the 10-bit readings written in each sector
+    (one value for all, or one per sector, cycled; 0 = no reading).
 
     Returns the naive local time of every sample in seconds since 1970.
     """
@@ -148,8 +162,8 @@ def write_cwa(
             99,
             k,
             _pack_timestamp(stamp),
-            scale_light,
-            0,
+            scale_light | _per_sector(light, k),
+            _per_sector(temperature_raw, k),
             0,
             0,
             rate_code,
@@ -192,26 +206,121 @@ def write_cwa(
 # CSV formats
 # ---------------------------------------------------------------------------
 
-def write_sens_csv(path: Path, timestamp_unix_ms: np.ndarray, xyz: np.ndarray) -> None:
+def write_sens_csv(path: Path, timestamp_unix_ms: np.ndarray, xyz: np.ndarray, extra: dict | None = None) -> None:
+    """A SENS motion CSV: ``unixts``, ``x``, ``y``, ``z`` and any ``extra`` columns after them."""
     pd.DataFrame({
         "unixts": np.round(timestamp_unix_ms).astype(np.int64),
         "x": xyz[:, 0],
         "y": xyz[:, 1],
         "z": xyz[:, 2],
+        **(extra or {}),
     }).to_csv(path, index=False)
 
 
-def write_polar_acc_csv(path: Path, timestamp_unix_ms: np.ndarray, xyz_g: np.ndarray) -> None:
-    times = pd.to_datetime(timestamp_unix_ms, unit="ms", utc=True)
-    pd.DataFrame({
-        "timestamp_iso": times.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "participant_id": "R4H001",
-        "activity_index": 1,
-        "phase_name": "static_prep",
+# The four columns every Polar file of lab_protocol_timer starts with.
+POLAR_SHARED = {"participant_id": "R4H001", "activity_index": 1, "phase_name": "static_prep"}
+
+
+def _polar_frame(timestamp_unix_ms, columns: dict) -> pd.DataFrame:
+    """Rows of a Polar file: ``timestamp_iso`` (host clock, UTC), the shared columns, then ``columns``."""
+    times = pd.to_datetime(np.asarray(timestamp_unix_ms, dtype=float), unit="ms", utc=True)
+    return pd.DataFrame({"timestamp_iso": times.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **POLAR_SHARED, **columns})
+
+
+def _with_sensor_time(columns: dict, sensor_time_ns) -> dict:
+    if sensor_time_ns is not None:
+        columns["sensor_time_ns"] = np.asarray(sensor_time_ns).astype(np.int64)
+    return columns
+
+
+def write_polar_acc_csv(path: Path, timestamp_unix_ms: np.ndarray, xyz_g: np.ndarray, sensor_time_ns=None) -> None:
+    columns = {
         "acc_x_mg": xyz_g[:, 0] * 1000.0,
         "acc_y_mg": xyz_g[:, 1] * 1000.0,
         "acc_z_mg": xyz_g[:, 2] * 1000.0,
-    }).to_csv(path, index=False)
+    }
+    _polar_frame(timestamp_unix_ms, _with_sensor_time(columns, sensor_time_ns)).to_csv(path, index=False)
+
+
+def write_polar_hr_csv(
+    path: Path,
+    timestamp_unix_ms: np.ndarray,
+    hr_bpm: np.ndarray,
+    rr_intervals_ms: list | None = None,
+    hr_source: str | None = "h10_ecg_firmware",
+) -> None:
+    """
+    ``polar_hr_*``: ``hr_bpm``, ``rr_intervals_ms`` (the intervals of each
+    row joined with ``;``; None gives the empty column of a Verity Sense)
+    and ``hr_source`` (None writes an older file without the column).
+    """
+    n = len(timestamp_unix_ms)
+    rows = rr_intervals_ms if rr_intervals_ms is not None else [[]] * n
+    rr = ["" if not row else ";".join(f"{v:.0f}" for v in row) for row in rows]
+    columns = {"hr_bpm": np.asarray(hr_bpm).astype(int), "rr_intervals_ms": rr}
+    if hr_source is not None:
+        columns["hr_source"] = hr_source
+    _polar_frame(timestamp_unix_ms, columns).to_csv(path, index=False)
+
+
+def write_polar_ecg_csv(path: Path, timestamp_unix_ms: np.ndarray, ecg_uv: np.ndarray, sensor_time_ns=None) -> None:
+    """``polar_ecg_*`` of the H10: ``ecg_uv`` (microvolts)."""
+    columns = {"ecg_uv": np.round(ecg_uv).astype(int)}
+    _polar_frame(timestamp_unix_ms, _with_sensor_time(columns, sensor_time_ns)).to_csv(path, index=False)
+
+
+def write_polar_ppg_csv(path: Path, timestamp_unix_ms: np.ndarray, ppg: np.ndarray, ambient: np.ndarray,
+                        sensor_time_ns=None) -> None:
+    """``polar_ppg_*`` of the Verity Sense: ``ppg0``, ``ppg1``, ``ppg2`` (N, 3) and ``ambient`` raw counts."""
+    ppg = np.round(ppg).astype(int)
+    columns = {"ppg0": ppg[:, 0], "ppg1": ppg[:, 1], "ppg2": ppg[:, 2], "ambient": np.round(ambient).astype(int)}
+    _polar_frame(timestamp_unix_ms, _with_sensor_time(columns, sensor_time_ns)).to_csv(path, index=False)
+
+
+def write_polar_ppi_csv(
+    path: Path,
+    timestamp_unix_ms: np.ndarray,
+    ppi_ms: np.ndarray,
+    hr_bpm: np.ndarray,
+    error_estimate_ms: np.ndarray,
+    blocker=0,
+    skin_contact=1,
+    skin_contact_supported=1,
+    index_in_frame=None,
+    sensor_time_ns=None,
+    hr_source: str | None = "verity_ppi_firmware",
+) -> None:
+    """
+    ``polar_ppi_*`` of the Verity Sense, one row per pulse. ``index_in_frame``,
+    ``sensor_time_ns`` and ``hr_source`` set to None leave the column out, as
+    in older files.
+    """
+    columns = {
+        "ppi_ms": np.round(ppi_ms).astype(int),
+        "hr_bpm": np.round(hr_bpm).astype(int),
+        "error_estimate_ms": np.round(error_estimate_ms).astype(int),
+        "blocker": blocker,
+        "skin_contact": skin_contact,
+        "skin_contact_supported": skin_contact_supported,
+    }
+    if index_in_frame is not None:
+        columns["index_in_frame"] = np.asarray(index_in_frame).astype(int)
+    _with_sensor_time(columns, sensor_time_ns)
+    if hr_source is not None:
+        columns["hr_source"] = hr_source
+    _polar_frame(timestamp_unix_ms, columns).to_csv(path, index=False)
+
+
+def write_polar_gyro_csv(path: Path, timestamp_unix_ms: np.ndarray, gyro_dps: np.ndarray, sensor_time_ns=None) -> None:
+    """``polar_gyro_*`` of the Verity Sense: ``gyro_x/y/z_dps``."""
+    columns = {"gyro_x_dps": gyro_dps[:, 0], "gyro_y_dps": gyro_dps[:, 1], "gyro_z_dps": gyro_dps[:, 2]}
+    _polar_frame(timestamp_unix_ms, _with_sensor_time(columns, sensor_time_ns)).to_csv(path, index=False)
+
+
+def write_polar_mag_csv(path: Path, timestamp_unix_ms: np.ndarray, mag_gauss: np.ndarray, sensor_time_ns=None) -> None:
+    """``polar_mag_*`` of the Verity Sense: ``mag_x/y/z_gauss``."""
+    columns = {"mag_x_gauss": mag_gauss[:, 0], "mag_y_gauss": mag_gauss[:, 1], "mag_z_gauss": mag_gauss[:, 2]}
+    _polar_frame(timestamp_unix_ms, _with_sensor_time(columns, sensor_time_ns)).to_csv(path, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -225,25 +334,51 @@ def write_matrix_bin(
     samples_per_package: int = 100,
     acc_range: int = 8,
     corrupt_packages: tuple[int, ...] = (),
+    gyro_dps: np.ndarray | None = None,
+    gyro_range: int = 2000,
+    temperature_c: np.ndarray | None = None,
+    heart_rate: np.ndarray | None = None,
 ) -> None:
-    """Write a Matrix file with one-second packages of accelerometer data."""
+    """
+    Write a Matrix file with one-second packages of accelerometer data.
+
+    ``gyro_dps`` (N, 3) adds a gyroscope block with the samples of each
+    package; ``temperature_c`` (packages, 2: body surface, ambient) and
+    ``heart_rate`` (packages, 2: hr_raw, hr) add one temperature and one
+    heart-rate sample per package, as the device does (cycled if shorter).
+    """
     packages = []
     n_packages = int(np.ceil(xyz_g.shape[0] / samples_per_package))
 
+    def counts(values: np.ndarray, sensor_range: float) -> np.ndarray:
+        return np.clip(np.round(values / sensor_range * 0x7FFF), -0x8000, 0x7FFF).astype(int)
+
     for k in range(n_packages):
-        chunk = xyz_g[k * samples_per_package:(k + 1) * samples_per_package]
-        raw = np.round(chunk / acc_range * 0x7FFF).astype(int)
-        payload = b"".join(struct.pack("hhh", *row) for row in raw)
+        rows = slice(k * samples_per_package, (k + 1) * samples_per_package)
+        chunk = xyz_g[rows]
+        payload = b"".join(struct.pack("<hhh", *row) for row in counts(chunk, acc_range))
+        n_gyro = n_temp = n_hr = 0
+        if gyro_dps is not None:
+            gyro = counts(gyro_dps[rows], gyro_range)
+            payload += b"".join(struct.pack("<hhh", *row) for row in gyro)
+            n_gyro = len(gyro)
+        if temperature_c is not None:
+            tenths = np.round(np.asarray(temperature_c[k % len(temperature_c)], dtype=float) * 10).astype(int)
+            payload += struct.pack("<hh", *tenths)
+            n_temp = 1
+        if heart_rate is not None:
+            payload += struct.pack("<hh", *np.asarray(heart_rate[k % len(heart_rate)]).astype(int))
+            n_hr = 1
 
         t_start = start_unix_s + k
         t_end = t_start + 1
-        body = struct.pack("IIIIII", t_start, t_end, len(chunk), 0, 0, 0) + payload
+        body = struct.pack("<IIIIII", t_start, t_end, len(chunk), n_gyro, n_temp, n_hr) + payload
         crc = binascii.crc32(body)
         if k in corrupt_packages:
             crc ^= 0xFFFF
-        packages.append(b"MDTCPACK" + struct.pack("I", crc) + body)
+        packages.append(b"MDTCPACK" + struct.pack("<I", crc) + body)
 
-    header = b"MDTC" + struct.pack("IHH", n_packages, acc_range, 0)
+    header = b"MDTC" + struct.pack("<IHH", n_packages, acc_range, gyro_range)
     path.write_bytes(bytes(512) + header + b"".join(packages))
 
 
@@ -269,11 +404,13 @@ def write_gt3x(
     layout: str = "log.bin",
     timezone_offset: str = "01:00:00",
     trailing_idle_s: int = 0,
+    lux: np.ndarray | None = None,
 ) -> None:
     """
     Write an ActiGraph .gt3x zip. ``xyz_g`` holds the samples of the
     recorded seconds only; ``idle_seconds`` are seconds without a record
-    (idle sleep), bracketed by idle-sleep events.
+    (idle sleep), bracketed by idle-sleep events. ``lux`` gives one LUX
+    record (type 0x05) per recorded second (cycled if shorter).
     """
     import zipfile
 
@@ -320,6 +457,8 @@ def write_gt3x(
             if second - 1 in idle:
                 log += record(0x03, t, b"\x09")
             chunk = counts[k * rate:(k + 1) * rate]
+            if lux is not None:
+                log += record(0x05, t, struct.pack("<H", int(lux[k % len(lux)])))
             k += 1
             if record_type == 0x1A:
                 payload = chunk.astype("<i2").tobytes()

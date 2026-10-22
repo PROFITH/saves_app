@@ -9,7 +9,8 @@ start date, acceleration scale) and the samples, in one of two layouts:
   the device's local time), a 2-byte payload size, the payload and a
   checksum byte. One ``ACTIVITY2`` record (type 0x1A, little-endian int16
   x, y, z) or ``ACTIVITY`` record (type 0x00, 12-bit packed y, x, z) holds
-  one second of samples.
+  one second of samples; a ``LUX`` record (type 0x05) holds the light
+  reading of its second in lux, as a little-endian unsigned short.
 - ``activity.bin`` (older firmware, NHANES layout): one continuous stream of
   12-bit packed y, x, z samples from the start date at the nominal rate.
 
@@ -38,6 +39,7 @@ from readers.recording import SensorRecording, build_recording_frame
 RECORD_SEPARATOR = 0x1E
 RECORD_ACTIVITY = 0x00
 RECORD_EVENT = 0x03
+RECORD_LUX = 0x05
 RECORD_ACTIVITY2 = 0x1A
 
 # .NET ticks (100 ns since 0001-01-01) of the Unix epoch.
@@ -77,7 +79,9 @@ def read_gt3x(
     SensorRecording
         Samples with ``timestamp_unix_ms`` in UTC, acceleration in g and an
         ``imputed`` column (1 for samples filled during idle sleep or other
-        gaps, 0 for recorded samples).
+        gaps, 0 for recorded samples). Files with LUX records also get
+        ``lux``: the reading of each second, kept until the next record
+        (NaN before the first one).
     """
     path = Path(file_path)
     with zipfile.ZipFile(path) as archive:
@@ -93,7 +97,7 @@ def read_gt3x(
 
         if "log.bin" in names:
             layout = "log.bin"
-            local_s, xyz, imputed, events = _read_log_bin(archive.read("log.bin"), rate, scale)
+            local_s, xyz, imputed, events, lux_records = _read_log_bin(archive.read("log.bin"), rate, scale)
         elif "activity.bin" in names:
             layout = "activity.bin"
             start_local = _ticks_to_local_seconds(info.get("Start Date"))
@@ -103,6 +107,7 @@ def read_gt3x(
             local_s = start_local + np.arange(xyz.shape[0]) / rate
             imputed = np.zeros(xyz.shape[0], dtype=bool)
             events = []
+            lux_records = {}
         else:
             raise ValueError(f"GT3X file has neither log.bin nor activity.bin: {path}")
 
@@ -116,12 +121,16 @@ def read_gt3x(
     offset_seconds = _utc_offset_seconds(local_s[0], info.get("TimeZone"), timezone, utc_offset_minutes)
     timestamp_unix_ms = (local_s - offset_seconds) * 1000.0
 
+    extra = {"imputed": imputed.astype(float)}
+    if lux_records:
+        extra["lux"] = _lux_per_sample(local_s, lux_records)
+
     data = build_recording_frame(
         timestamp_unix_ms,
         xyz[:, 0],
         xyz[:, 1],
         xyz[:, 2],
-        extra={"imputed": imputed.astype(float)},
+        extra=extra,
     )
 
     serial = info.get("Serial Number", "")
@@ -135,6 +144,7 @@ def read_gt3x(
         "accel_range_g": _float(info.get("Acceleration Max")),
         "layout": layout,
         "n_imputed_samples": int(imputed.sum()),
+        "n_lux_records": len(lux_records),
         "idle_sleep_events": events,
         "utc_offset_minutes": offset_seconds / 60.0,
         "info": info,
@@ -206,11 +216,12 @@ def _unpack_12bit_yxz(payload: bytes) -> np.ndarray:
 
 
 def _read_log_bin(log: bytes, rate: float, scale: float):
-    """Samples of ACTIVITY / ACTIVITY2 records with idle-sleep gaps filled."""
+    """Samples of ACTIVITY / ACTIVITY2 records with idle-sleep gaps filled, plus the LUX records by second."""
     per_record = round(rate)
     times: list[int] = []
     blocks: list[np.ndarray] = []
     events: list[dict] = []
+    lux: dict[int, int] = {}
 
     offset = 0
     size_total = len(log)
@@ -240,6 +251,8 @@ def _read_log_bin(log: bytes, rate: float, scale: float):
                     "local_unix_s": timestamp,
                     "event": "idle_sleep_start" if payload[0] == 0x08 else "idle_sleep_end",
                 })
+            elif record_type == RECORD_LUX and size >= 2:
+                lux[timestamp] = int.from_bytes(payload[:2], "little")
             # 1-byte activity records carry no samples (USB connection marker).
             continue
 
@@ -247,7 +260,7 @@ def _read_log_bin(log: bytes, rate: float, scale: float):
         blocks.append(samples[:per_record] / scale)
 
     if not blocks:
-        return np.zeros(0), np.zeros((0, 3)), np.zeros(0, dtype=bool), events
+        return np.zeros(0), np.zeros((0, 3)), np.zeros(0, dtype=bool), events, lux
 
     order = np.argsort(np.asarray(times), kind="stable")
     times_arr = np.asarray(times)[order]
@@ -283,7 +296,18 @@ def _read_log_bin(log: bytes, rate: float, scale: float):
         np.concatenate(xyz_parts),
         np.concatenate(imputed_parts),
         events,
+        lux,
     )
+
+
+def _lux_per_sample(local_s: np.ndarray, lux: dict[int, int]) -> np.ndarray:
+    """Lux of each sample: the last LUX record at or before its second (NaN before the first)."""
+    seconds = np.array(sorted(lux), dtype=float)
+    values = np.array([lux[int(s)] for s in seconds], dtype=float)
+    index = np.searchsorted(seconds, np.floor(local_s + 1e-6), side="right") - 1
+    out = values[np.clip(index, 0, None)]
+    out[index < 0] = np.nan
+    return out
 
 
 def _fill_until(local_s, xyz, imputed, last_local_s, rate):

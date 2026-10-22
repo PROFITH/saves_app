@@ -229,3 +229,94 @@ def test_sit_to_stands_and_other_events_are_exported(engine, tmp_path):
         engine.project.remove_event_type(stairs.key)
         engine.project.tasks = {}
         engine.project.technician = ""
+
+
+def test_polar_companions_take_the_clock_fit_of_their_acceleration(engine, tmp_path):
+    import pandas as pd
+
+    written = {p.relative_to(tmp_path).as_posix() for p in engine.export(tmp_path)}
+    assert {
+        "signals/polar_h10_ecg.csv.gz", "signals/verity_arm_ppg.csv.gz", "signals/verity_arm_gyro.csv.gz",
+        "signals/verity_arm_mag.csv.gz", "heart_rate/polar_h10.csv", "heart_rate/verity_arm.csv",
+        "heart_rate/verity_arm_ppi.csv",
+    } <= written
+    assert not any(name.startswith("heart_rate/polar_h10_") for name in written)  # the H10 has no PPI
+    session = engine.session
+    t0 = session.start_time.timestamp() - 5.0  # the companion files start 5 s before the session
+    duration = session.end_time.timestamp() + 5.0 - t0
+    labels = ["activity_index", "activity", "attempt", "phase"]
+
+    streams = {
+        "polar_h10": {"ecg": (["ecg_uv"], 130.0)},
+        "verity_arm": {
+            "ppg": (["ppg0", "ppg1", "ppg2", "ambient"], 55.0),
+            "gyro": (["gyro_x", "gyro_y", "gyro_z"], 52.0),
+            "mag": (["mag_x", "mag_y", "mag_z"], 50.0),
+        },
+    }
+    for sid, kinds in streams.items():
+        acc = pd.read_csv(tmp_path / "signals" / f"{sid}.csv.gz")
+        shift_ms = (acc["time_unix_ms"] - acc["time_native_unix_ms"]).median()
+        for kind, (channels, rate) in kinds.items():
+            frame = pd.read_csv(tmp_path / "signals" / f"{sid}_{kind}.csv.gz")
+            assert list(frame.columns) == ["time_unix_ms", "time_native_unix_ms", *channels, *labels], kind
+            # Same device, same clock: the fit of the acceleration moves every file alike.
+            assert (frame["time_unix_ms"] - frame["time_native_unix_ms"]).median() == pytest.approx(shift_ms, abs=1), kind
+            assert len(frame) == pytest.approx(rate * duration, rel=0.01), kind
+            assert frame["time_unix_ms"].min() / 1000 == pytest.approx(t0, abs=0.5), kind
+            assert "Trotar a ritmo propio" in set(frame.loc[frame["phase"] == "activity_main", "activity"]), kind
+
+    chest = pd.read_csv(tmp_path / "heart_rate" / "polar_h10.csv")
+    assert list(chest.columns) == ["time_unix_ms", "hr_bpm", "rr_intervals_ms", "hr_source", *labels]
+    assert len(chest) == pytest.approx(duration, rel=0.01)
+    assert set(chest["hr_source"]) == {"h10_ecg_firmware"}
+    assert chest["rr_intervals_ms"].between(350, 1100).all()
+    jog = chest[(chest["activity"] == "Trotar a ritmo propio") & (chest["phase"] == "activity_main")]
+    rest = chest[(chest["activity_index"] == 1) & (chest["phase"] == "activity_main")]
+    assert jog["hr_bpm"].mean() > rest["hr_bpm"].mean() + 60
+
+    arm = pd.read_csv(tmp_path / "heart_rate" / "verity_arm.csv")
+    assert set(arm["hr_source"]) == {"verity_ppg_firmware"}
+    assert arm["rr_intervals_ms"].isna().all()  # the Verity Sense sends no RR intervals
+
+    ppi = pd.read_csv(tmp_path / "heart_rate" / "verity_arm_ppi.csv")
+    assert list(ppi.columns) == [
+        "time_unix_ms", "ppi_ms", "hr_bpm", "error_estimate_ms", "blocker", "skin_contact",
+        "skin_contact_supported", "index_in_frame", "hr_source", *labels,
+    ]
+    assert set(ppi["hr_source"]) == {"verity_ppi_firmware"}
+    assert ppi["ppi_ms"].between(350, 1100).all()
+    # The pulses arrive in 5-s batches, the first one 25 s late: the rows of
+    # a batch share time_unix_ms and index_in_frame orders them.
+    assert ppi["time_unix_ms"].min() / 1000 == pytest.approx(t0 + 30.0, abs=0.5)
+    batches = ppi.groupby("time_unix_ms", sort=True)["index_in_frame"].apply(list)
+    assert all(order == list(range(len(order))) for order in batches)
+    assert batches.map(len).median() >= 5
+    assert "sin acelerómetro sincronizado" not in (tmp_path / "LEEME.txt").read_text(encoding="utf-8")
+
+
+def test_a_polar_without_synchronized_acceleration_keeps_the_host_clock(engine, tmp_path):
+    from pathlib import Path
+
+    import numpy as np
+    import pandas as pd
+
+    from tests.synthetic import write_polar_hr_csv
+
+    session = engine.session
+    times_ms = (session.start_time.timestamp() + np.arange(120.0)) * 1000.0
+    # An older heart-rate file (no hr_source) of a device whose acceleration is not in the project.
+    spare = Path(engine.project.folder) / "polar_hr_h10_spare_20261021_103000.csv"
+    write_polar_hr_csv(spare, times_ms, np.full(120, 70), [[850.0]] * 120, hr_source=None)
+    try:
+        written = {p.relative_to(tmp_path).as_posix() for p in engine.export(tmp_path)}
+    finally:
+        spare.unlink()
+
+    assert "heart_rate/h10_spare.csv" in written
+    hr = pd.read_csv(tmp_path / "heart_rate" / "h10_spare.csv")
+    np.testing.assert_array_equal(hr["time_unix_ms"], np.round(times_ms).astype(np.int64))  # no fit to apply
+    assert set(hr["hr_source"]) == {"h10_ecg_firmware"}  # inferred from the file name
+    assert hr["activity"].notna().any()
+    readme = (tmp_path / "LEEME.txt").read_text(encoding="utf-8")
+    assert "sin acelerómetro sincronizado" in readme and "h10_spare" in readme

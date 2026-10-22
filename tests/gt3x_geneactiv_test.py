@@ -74,6 +74,25 @@ def test_gt3x_old_activity_bin_layout(tmp_path):
     assert recording.data["timestamp_unix_ms"].iloc[0] == (START_UTC_S + 3600 + 5 * 3600) * 1000
 
 
+def test_gt3x_lux_records_are_kept_per_second(tmp_path):
+    rate = 30
+    xyz = _accel(rate * 10)
+    path = tmp_path / "lux.gt3x"
+    write_gt3x(path, START_LOCAL, xyz, rate=rate, idle_seconds=(4, 5, 6), trailing_idle_s=2, lux=[10, 20, 30])
+
+    recording = read_gt3x(path)
+    per_second = recording.data["lux"].to_numpy().reshape(15, rate)
+
+    assert recording.metadata["n_lux_records"] == 10
+    # One reading per recorded second, kept through idle sleep and the idle tail.
+    assert list(per_second[:, 0]) == [10, 20, 30, 10, 10, 10, 10, 20, 30, 10, 20, 30, 10, 10, 10]
+    assert (per_second == per_second[:, :1]).all()
+
+    write_gt3x(tmp_path / "dark.gt3x", START_LOCAL, xyz, rate=rate)
+    plain = read_gt3x(tmp_path / "dark.gt3x")
+    assert "lux" not in plain.data.columns and plain.metadata["n_lux_records"] == 0
+
+
 def test_geneactiv_calibration_light_button_and_page_times(tmp_path):
     rate = 100.0
     xyz = _accel(300 * 6, seed=7) * 0.9
@@ -93,7 +112,7 @@ def test_geneactiv_calibration_light_button_and_page_times(tmp_path):
     np.testing.assert_allclose(data[["x", "y", "z"]], xyz[:1500], atol=100 / 2 / 25538 + 1e-9)
     np.testing.assert_allclose(data["light"].iloc[:4], np.arange(4) * 800 / 300)
     assert data["button"].iloc[0] == 0 and data["button"].iloc[300] == 1
-    assert data["temperature"].iloc[0] == 24.5
+    assert data["temperature_c"].iloc[0] == 24.5
     np.testing.assert_allclose(data["timestamp_unix_ms"].iloc[0], START_UTC_S * 1000)
     np.testing.assert_allclose(np.diff(data["timestamp_unix_ms"]), 10.0, atol=1e-3)
 

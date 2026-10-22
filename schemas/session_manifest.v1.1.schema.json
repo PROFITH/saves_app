@@ -216,6 +216,20 @@
           },
           "free_living": {
             "type": "boolean"
+          },
+          "signals": {
+            "type": "array",
+            "description": "Streams requested from a live device, e.g. acc, ecg, heart_rate, rr, ppg, ppi, gyro, mag.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "files": {
+            "type": "array",
+            "description": "Names (no folder) of the CSV files of a live device that got rows.",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

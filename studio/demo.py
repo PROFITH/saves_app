@@ -167,7 +167,12 @@ def build_demo_session(folder: str | Path, with_video: bool = True) -> Path:
     drift = 120e-6
     t_dev = t_true + 0.9 + drift * (t_true - t_true[0])
     start_local = datetime.fromtimestamp(t_dev[0] + 3600, tz=timezone.utc).replace(tzinfo=None)
-    write_cwa(folder / "R4H_DEMO_wrist_nd.cwa", start_local, body_signal(t_true, 2), true_frequency=100 / (1 + drift), fractional=True)
+    # Light and temperature of each sector: an indoor level and a wrist warming up.
+    sectors = np.arange(t_true.size // 120 + 1)
+    write_cwa(
+        folder / "R4H_DEMO_wrist_nd.cwa", start_local, body_signal(t_true, 2), true_frequency=100 / (1 + drift),
+        fractional=True, light=np.round(300 + 80 * np.sin(sectors / 20)), temperature_raw=np.round(262 + sectors / 40),
+    )
 
     # Matrix (UTC clock, whole-second packages) 2 s behind.
     t_mx = np.arange(START - 4, START + DURATION + 5, 1 / 100)

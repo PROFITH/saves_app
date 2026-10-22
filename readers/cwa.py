@@ -72,7 +72,10 @@ def read_cwa(
     SensorRecording
         Samples with ``timestamp_unix_ms`` in UTC and acceleration in g;
         ``gyro_x/y/z`` (degrees per second) are added for AX6 files with
-        gyroscope enabled.
+        gyroscope enabled. ``light_raw`` (the 10-bit reading of the light
+        sensor, uncalibrated) and ``temperature_c`` (°C, NaN when the
+        sector has no reading) are read once per sector and repeated on
+        every sample of their sector.
     """
     path = Path(file_path)
     buffer = np.fromfile(path, dtype=np.uint8)
@@ -159,6 +162,12 @@ def read_cwa(
             "gyro_z": gyro[:, 2],
         }
 
+    # Light and temperature are read once per sector (about 1.2 times per
+    # second at 100 Hz) and repeated on every sample of the sector.
+    temperature_raw = sectors["temperature"].astype(np.int64) & 0x03FF
+    extra["light_raw"] = np.repeat(scale_light & 0x03FF, sample_count)
+    extra["temperature_c"] = np.repeat(temperature_celsius(temperature_raw), sample_count)
+
     local_seconds = _sample_times_local_seconds(
         sectors,
         sample_count,
@@ -201,6 +210,18 @@ def read_cwa(
         sampling_rate_hz=frequency,
         metadata=metadata,
     )
+
+
+def temperature_celsius(raw: np.ndarray) -> np.ndarray:
+    """
+    Degrees Celsius from the 10-bit temperature reading of a sector.
+
+    Axivity documents the conversion as ``(counts - 171) / 3.413``, the
+    same line that Open Movement's and GGIR's readers write as
+    ``counts * 75 / 256 - 50``. A reading of 0 means no measurement (NaN).
+    """
+    raw = np.asarray(raw, dtype=float)
+    return np.where(raw > 0, raw * 75.0 / 256.0 - 50.0, np.nan)
 
 
 def _parse_header(buffer: np.ndarray) -> dict:

@@ -616,6 +616,7 @@ class SyncEngine:
                     "serial": self._serial(sid),
                     "sensor_type": r.sensor_type,
                     "sampling_rate_hz": r.sampling_rate_hz,
+                    "channels": list(self.signals[sid].channels),
                     "fit": _clean(r.fit),
                     "coverage": r.coverage,
                     "manual_anchors": self.project.manual_anchors.get(sid, {}),
@@ -637,7 +638,7 @@ class SyncEngine:
         written.append(out / "qc.json")
         written[-1].write_text(json.dumps(qc, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
-        from studio.export import export_dataset
+        from studio.export import export_dataset, signal_columns
 
         written += export_dataset(self, out)
 
@@ -647,7 +648,7 @@ class SyncEngine:
                 frame = pd.DataFrame({
                     "timestamp_native_unix_ms": signal.t_ms,
                     "timestamp_aligned_unix_ms": self.sensor_to_display(sid, signal.t_ms) * 1000.0,
-                    **{c: signal.channels[c] for c in ("x", "y", "z")},
+                    **signal_columns(signal),
                 })
                 written.append(out / f"{sid}_aligned.csv.gz")
                 frame.to_csv(written[-1], index=False)

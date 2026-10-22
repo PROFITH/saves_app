@@ -79,6 +79,10 @@ def test_signal_cache_is_reused(demo):
     second = load_signal(path, "cwa", demo)
     np.testing.assert_array_equal(first.t_ms, second.t_ms)
     assert second.sampling_rate_hz == pytest.approx(100, rel=0.01)
+    # Every channel of the file survives the cache, not only the acceleration.
+    assert second.extra_channels == ["light_raw", "temperature_c"]
+    np.testing.assert_array_equal(first.channels["light_raw"], second.channels["light_raw"])
+    assert 20 < np.nanmean(second.channels["temperature_c"]) < 40
 
 
 def test_engine_recovers_known_clock_errors(engine):
@@ -144,6 +148,19 @@ def test_export_writes_reports(engine, tmp_path):
     assert "location" in report.columns
     qc = json.loads((tmp_path / "qc.json").read_text(encoding="utf-8"))
     assert qc["reference"] == "h10"
+    assert qc["sensors"]["ax_wrist_nd"]["channels"] == ["x", "y", "z", "vm", "light_raw", "temperature_c"]
+    # The light and temperature of the AX3 go with its acceleration, in both exports.
+    wrist = pd.read_csv(tmp_path / "signals" / "ax_wrist_nd.csv.gz")
+    assert list(wrist.columns) == ["time_unix_ms", "time_native_unix_ms", "x", "y", "z", "light_raw", "temperature_c",
+                                   "activity_index", "activity", "attempt", "phase"]
+    assert wrist["light_raw"].between(220, 380).all() and wrist["temperature_c"].between(20, 40).all()
+    aligned = pd.read_csv(tmp_path / "ax_wrist_nd_aligned.csv.gz")
+    assert list(aligned.columns) == ["timestamp_native_unix_ms", "timestamp_aligned_unix_ms", "x", "y", "z",
+                                     "light_raw", "temperature_c"]
+    matrix = pd.read_csv(tmp_path / "signals" / "matrix.csv.gz")
+    assert list(matrix.columns[:5]) == ["time_unix_ms", "time_native_unix_ms", "x", "y", "z"]
+    # The demo's Polar has no companion files: nothing else is written for it.
+    assert not (tmp_path / "heart_rate").exists()
 
 
 def test_project_round_trip_keeps_relative_paths(engine, demo):

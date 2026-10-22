@@ -26,11 +26,16 @@ from readers import infer_format
 from readers.cwa import _parse_header
 from readers.geneactiv import read_geneactiv_serial
 from readers.gt3x import read_gt3x_serial
+from readers.polar import POLAR_COMPANION_KINDS, POLAR_LOG_KINDS
 from studio.project import SensorEntry, VideoEntry
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
 SENSOR_SUFFIXES = (".cwa", ".gt3x", ".bin", ".csv")
 SKIP_DIRS = {"saves_sync", "saves_export", ".saves_cache", "__pycache__"}
+# Files of a live Polar device other than its acceleration (heart rate, ECG,
+# PPG, PPI, gyroscope, magnetometer, clock fit, connection log): exported
+# with the device's clock fit, never sensors of their own.
+POLAR_COMPANION_PREFIXES = tuple(f"polar_{kind}_" for kind in (*POLAR_COMPANION_KINDS, *POLAR_LOG_KINDS))
 
 FORMAT_LABELS = {
     "cwa": "Axivity",
@@ -191,7 +196,7 @@ def discover(folder: str | Path) -> Discovery:
             videos.append(path)
         elif name.startswith("video_sync_session") and name.endswith(".csv"):
             video_starts.update(read_video_log(path))
-        elif name.startswith(("polar_hr_", "polar_ecg_", "redcap_records")):
+        elif name.startswith((*POLAR_COMPANION_PREFIXES, "redcap_records")):
             found.ignored.append(str(path))
         else:
             entry = sensor_entry_for(path)

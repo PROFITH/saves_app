@@ -6,6 +6,11 @@ once and cached as ``.npz`` in ``<session>/.saves_cache``; later openings
 load in about a second. For plotting, a min/max pyramid returns at most a
 few thousand points for any zoom level, so panning a 7-day recording is as
 fluid as a 10-minute one.
+
+A signal keeps every channel of its file: the acceleration (``x``, ``y``,
+``z`` and their magnitude ``vm``, the only channels the plots and the clap
+detection use) and whatever else the reader found (gyroscope, light,
+temperature, heart rate...), on the same sample grid, for the export.
 """
 
 from __future__ import annotations
@@ -23,9 +28,12 @@ from readers import read_sensor
 from readers.recording import MAGNITUDE_COLUMN, TIMESTAMP_COLUMN, SensorRecording
 
 CACHE_DIR = ".saves_cache"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 PYRAMID_FACTOR = 8
+# Channels every signal has; the rest depend on the file.
 CHANNELS = ("x", "y", "z", "vm")
+# Values of this size or more lose precision as float32 (integer counters, timestamps).
+_FLOAT32_EXACT = 2**24
 
 
 @dataclass
@@ -80,7 +88,12 @@ class Envelope:
 
 @dataclass
 class SignalData:
-    """Samples of one sensor kept as plain arrays."""
+    """
+    Samples of one sensor kept as plain arrays.
+
+    ``channels`` always holds ``x``, ``y``, ``z`` and ``vm`` first, then
+    the other channels of the file in the order the reader gave them.
+    """
 
     sensor_type: str
     t_ms: np.ndarray
@@ -101,22 +114,24 @@ class SignalData:
     def duration_s(self) -> float:
         return (self.end_ms - self.start_ms) / 1000.0
 
+    @property
+    def extra_channels(self) -> list[str]:
+        """Channels other than x, y, z and vm, in reader order."""
+        return [c for c in self.channels if c not in CHANNELS]
+
     def envelope(self, channel: str) -> Envelope:
         if channel not in self._envelopes:
             self._envelopes[channel] = Envelope.build(self.t_ms, self.channels[channel])
         return self._envelopes[channel]
 
     def to_recording(self, t0_ms: Optional[float] = None, t1_ms: Optional[float] = None) -> SensorRecording:  # noqa: UP045
-        """SensorRecording for the headless pipeline, optionally cropped."""
+        """SensorRecording for the headless pipeline (every channel), optionally cropped."""
         i0 = 0 if t0_ms is None else int(np.searchsorted(self.t_ms, t0_ms))
         i1 = self.t_ms.size if t1_ms is None else int(np.searchsorted(self.t_ms, t1_ms, side="right"))
-        frame = pd.DataFrame({
-            TIMESTAMP_COLUMN: self.t_ms[i0:i1],
-            "x": self.channels["x"][i0:i1].astype(float),
-            "y": self.channels["y"][i0:i1].astype(float),
-            "z": self.channels["z"][i0:i1].astype(float),
-            MAGNITUDE_COLUMN: self.channels["vm"][i0:i1].astype(float),
-        })
+        frame = pd.DataFrame({TIMESTAMP_COLUMN: self.t_ms[i0:i1]})
+        for name in ("x", "y", "z", *self.extra_channels):
+            frame[name] = self.channels[name][i0:i1].astype(float)
+        frame[MAGNITUDE_COLUMN] = self.channels["vm"][i0:i1].astype(float)
         return SensorRecording(
             sensor_type=self.sensor_type,
             data=frame,
@@ -127,18 +142,26 @@ class SignalData:
     @classmethod
     def from_recording(cls, recording: SensorRecording) -> SignalData:
         data = recording.data
+        channels = {c: data[c].to_numpy(dtype=np.float32) for c in ("x", "y", "z")}
+        channels["vm"] = data[MAGNITUDE_COLUMN].to_numpy(dtype=np.float32)
+        for column in data.columns:
+            if column not in (TIMESTAMP_COLUMN, MAGNITUDE_COLUMN, "x", "y", "z"):
+                channels[str(column)] = _compact(data[column].to_numpy(dtype=np.float64))
         return cls(
             sensor_type=recording.sensor_type,
             t_ms=data[TIMESTAMP_COLUMN].to_numpy(dtype=np.float64),
-            channels={
-                "x": data["x"].to_numpy(dtype=np.float32),
-                "y": data["y"].to_numpy(dtype=np.float32),
-                "z": data["z"].to_numpy(dtype=np.float32),
-                "vm": data[MAGNITUDE_COLUMN].to_numpy(dtype=np.float32),
-            },
+            channels=channels,
             sampling_rate_hz=float(recording.sampling_rate_hz),
             metadata=_jsonable(recording.metadata),
         )
+
+
+def _compact(values: np.ndarray) -> np.ndarray:
+    """float32 unless the values are too large for it to keep them exactly."""
+    finite = values[np.isfinite(values)]
+    if finite.size and np.abs(finite).max() >= _FLOAT32_EXACT:
+        return values
+    return values.astype(np.float32)
 
 
 def _jsonable(value):
@@ -176,7 +199,7 @@ def load_signal(
                 return SignalData(
                     sensor_type=meta["sensor_type"],
                     t_ms=npz["t_ms"],
-                    channels={c: npz[c] for c in CHANNELS},
+                    channels={c: npz[f"ch_{c}"] for c in meta["channels"]},
                     sampling_rate_hz=meta["sampling_rate_hz"],
                     metadata=meta.get("metadata", {}),
                 )
@@ -195,10 +218,11 @@ def load_signal(
             meta = {
                 "sensor_type": signal.sensor_type,
                 "sampling_rate_hz": signal.sampling_rate_hz,
+                "channels": list(signal.channels),
                 "metadata": signal.metadata,
             }
             tmp = cached.with_name(cached.stem + ".tmp.npz")
-            np.savez(tmp, t_ms=signal.t_ms, meta=json.dumps(meta), **signal.channels)
+            np.savez(tmp, t_ms=signal.t_ms, meta=json.dumps(meta), **{f"ch_{c}": v for c, v in signal.channels.items()})
             tmp.replace(cached)
         except OSError:
             pass  # A read-only folder only loses the speed-up.

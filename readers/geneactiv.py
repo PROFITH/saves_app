@@ -57,8 +57,8 @@ def read_geneactiv(
     -------
     SensorRecording
         Samples with ``timestamp_unix_ms`` in UTC, calibrated acceleration
-        in g, ``light`` (lux), ``button`` (0/1) and ``temperature`` (°C, per
-        page).
+        in g, ``light`` (lux), ``button`` (0/1) and ``temperature_c`` (°C,
+        read once per page and repeated on its 300 samples).
     """
     path = Path(file_path)
     text = path.read_bytes().decode("latin-1")
@@ -146,7 +146,7 @@ def read_geneactiv(
         x,
         y,
         z,
-        extra={"light": light, "button": button, "temperature": temperature},
+        extra={"light": light, "button": button, "temperature_c": temperature},
     )
 
     rate = nominal_rate or float(np.median(page_rates))
