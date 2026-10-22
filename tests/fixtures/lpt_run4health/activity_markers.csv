@@ -1,0 +1,10 @@
+activity_index,activity_start_time_utc,activity_end_time_utc,duration_seconds,activity_name,compendium_code,planned_duration_seconds,met,activity_kind,attempt,completion,end_reason,paused_seconds,rpe,rpe_before,resting_hr_bpm,incident
+1,2026-10-21T08:30:30.000Z,2026-10-21T08:35:30.000Z,300.000000,Tumbado en reposo,07011,300,1.0,activity,1,complete,timer,0.000,3,,,
+2,2026-10-21T08:36:35.000Z,2026-10-21T08:40:35.000Z,240.000000,De pie quieto,07040,240,1.3,activity,1,complete,timer,0.000,3,,,
+3,2026-10-21T08:41:40.000Z,2026-10-21T08:45:40.000Z,240.000000,Sentado escribiendo en el ordenador,09040,240,1.3,activity,1,complete,timer,0.000,3,,,
+4,2026-10-21T08:46:45.000Z,2026-10-21T08:50:45.000Z,240.000000,Caminar despacio con bolsas de la compra,05054,240,3.5,activity,1,complete,timer,0.000,3,,,
+5,2026-10-21T08:51:50.000Z,2026-10-21T08:55:50.000Z,240.000000,Barrer,05010,240,3.3,activity,1,complete,timer,0.000,3,,,
+6,2026-10-21T08:56:55.000Z,2026-10-21T09:00:55.000Z,240.000000,Subir escaleras,17131,240,6.8,activity,1,complete,timer,0.000,3,,,
+7,2026-10-21T09:02:00.000Z,2026-10-21T09:06:00.000Z,240.000000,Trotar a ritmo propio,12020,240,7.5,activity,1,complete,timer,0.000,3,,,
+8,2026-10-21T09:07:05.000Z,2026-10-21T09:07:35.000Z,30.000000,Sentarse y levantarse 30 s,02344,30,4.0,activity,1,complete,timer,0.000,3,,,
+9,2026-10-21T09:08:40.000Z,2026-10-21T09:14:40.000Z,360.000000,Marcha de 6 minutos,17220,360,5.5,activity,1,complete,timer,0.000,3,,,

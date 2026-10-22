@@ -1,0 +1,5 @@
+-r requirements-core.txt
+pytest>=7
+jsonschema>=4
+# Reference CWA reader used to cross-check readers/cwa.py in the tests
+openmovement

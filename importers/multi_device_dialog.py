@@ -20,6 +20,9 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
+# Order matches the items of the device-type combo box.
+DEVICE_TYPES = ("SENS", "Matrix", "Axivity")
+
 
 class MultiDeviceLoadDialog(QDialog):
     def __init__(self, parent=None):
@@ -138,7 +141,7 @@ class MultiDeviceLoadDialog(QDialog):
         row_top.addWidget(lbl_num)
 
         combo_type = QComboBox()
-        combo_type.addItems(["SENS Motion (*.csv)", "Parmay Matrix (*.bin)"])
+        combo_type.addItems(["SENS Motion (*.csv)", "Parmay Matrix (*.bin)", "Axivity AX3/AX6 (*.cwa)"])
         if device_num == 2:
             combo_type.setCurrentIndex(1)
         row_top.addWidget(QLabel("Tipo:"))
@@ -180,6 +183,8 @@ class MultiDeviceLoadDialog(QDialog):
     def _browse_file(self, line_edit: QLineEdit, combo: QComboBox):
         if combo.currentIndex() == 0:
             filter_str = "Archivos SENS (*.csv);;Todos (*.*)"
+        elif combo.currentIndex() == 2:
+            filter_str = "Archivos Axivity (*.cwa);;Todos (*.*)"
         else:
             filter_str = "Archivos Matrix (*.bin);;Todos (*.*)"
         f_path, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo de sensor", "", filter_str)
@@ -196,7 +201,7 @@ class MultiDeviceLoadDialog(QDialog):
         for i, row in enumerate(self.device_rows, start=1):
             p = row["path"].text().strip()
             if p and Path(p).exists():
-                stype = "SENS" if row["type"].currentIndex() == 0 else "Matrix"
+                stype = DEVICE_TYPES[row["type"].currentIndex()]
                 devices.append({
                     "id": i,
                     "type": stype,
@@ -223,7 +228,7 @@ class MultiDeviceLoadDialog(QDialog):
         for i, row in enumerate(self.device_rows, start=1):
             p = row["path"].text().strip()
             if p and Path(p).exists():
-                stype = "SENS" if row["type"].currentIndex() == 0 else "Matrix"
+                stype = DEVICE_TYPES[row["type"].currentIndex()]
                 devices.append({"id": i, "type": stype, "path": p})
 
         time_window = None
