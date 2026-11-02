@@ -1,0 +1,104 @@
+time_utc,time_local,event,activity_index,attempt,phase,detail
+2026-10-21T08:30:00.000Z,08:30:00,session_started,1,1,static_prep,con vídeo
+2026-10-21T08:30:00.000Z,08:30:00,phase_started,1,1,static_prep,Tumbado en reposo
+2026-10-21T08:30:12.000Z,08:30:12,sync_cue,1,,static_prep,sync_1 clap auto
+2026-10-21T08:30:15.000Z,08:30:15,sync_go,1,,static_prep,sync_1 clap
+2026-10-21T08:30:30.000Z,08:30:30,phase_started,1,1,activity_main,Tumbado en reposo
+2026-10-21T08:35:30.000Z,08:35:30,activity_logged,1,1,,complete timer 300.0 s
+2026-10-21T08:35:30.000Z,08:35:30,phase_started,1,1,static_post,Tumbado en reposo
+2026-10-21T08:35:42.000Z,08:35:42,sync_cue,1,,static_post,sync_2 clap auto
+2026-10-21T08:35:45.000Z,08:35:45,sync_go,1,,static_post,sync_2 clap
+2026-10-21T08:36:00.000Z,08:36:00,phase_started,1,1,transition_lap,Tumbado en reposo
+2026-10-21T08:36:00.000Z,08:36:00,annotation,1,1,,rpe=3
+2026-10-21T08:36:05.000Z,08:36:05,operator_advance,2,1,static_prep,
+2026-10-21T08:36:05.000Z,08:36:05,phase_started,2,1,static_prep,De pie quieto
+2026-10-21T08:36:17.000Z,08:36:17,sync_cue,2,,static_prep,sync_3 jump auto
+2026-10-21T08:36:20.000Z,08:36:20,sync_go,2,,static_prep,sync_3 jump
+2026-10-21T08:36:35.000Z,08:36:35,phase_started,2,1,activity_main,De pie quieto
+2026-10-21T08:40:35.000Z,08:40:35,activity_logged,2,1,,complete timer 240.0 s
+2026-10-21T08:40:35.000Z,08:40:35,phase_started,2,1,static_post,De pie quieto
+2026-10-21T08:40:47.000Z,08:40:47,sync_cue,2,,static_post,sync_4 jump auto
+2026-10-21T08:40:50.000Z,08:40:50,sync_go,2,,static_post,sync_4 jump
+2026-10-21T08:41:05.000Z,08:41:05,phase_started,2,1,transition_lap,De pie quieto
+2026-10-21T08:41:05.000Z,08:41:05,annotation,2,1,,rpe=3
+2026-10-21T08:41:10.000Z,08:41:10,operator_advance,3,1,static_prep,
+2026-10-21T08:41:10.000Z,08:41:10,phase_started,3,1,static_prep,Sentado escribiendo en el ordenador
+2026-10-21T08:41:22.000Z,08:41:22,sync_cue,3,,static_prep,sync_5 clap auto
+2026-10-21T08:41:25.000Z,08:41:25,sync_go,3,,static_prep,sync_5 clap
+2026-10-21T08:41:40.000Z,08:41:40,phase_started,3,1,activity_main,Sentado escribiendo en el ordenador
+2026-10-21T08:45:40.000Z,08:45:40,activity_logged,3,1,,complete timer 240.0 s
+2026-10-21T08:45:40.000Z,08:45:40,phase_started,3,1,static_post,Sentado escribiendo en el ordenador
+2026-10-21T08:45:52.000Z,08:45:52,sync_cue,3,,static_post,sync_6 clap auto
+2026-10-21T08:45:55.000Z,08:45:55,sync_go,3,,static_post,sync_6 clap
+2026-10-21T08:46:10.000Z,08:46:10,phase_started,3,1,transition_lap,Sentado escribiendo en el ordenador
+2026-10-21T08:46:10.000Z,08:46:10,annotation,3,1,,rpe=3
+2026-10-21T08:46:15.000Z,08:46:15,operator_advance,4,1,static_prep,
+2026-10-21T08:46:15.000Z,08:46:15,phase_started,4,1,static_prep,Caminar despacio con bolsas de la compra
+2026-10-21T08:46:27.000Z,08:46:27,sync_cue,4,,static_prep,sync_7 jump auto
+2026-10-21T08:46:30.000Z,08:46:30,sync_go,4,,static_prep,sync_7 jump
+2026-10-21T08:46:45.000Z,08:46:45,phase_started,4,1,activity_main,Caminar despacio con bolsas de la compra
+2026-10-21T08:50:45.000Z,08:50:45,activity_logged,4,1,,complete timer 240.0 s
+2026-10-21T08:50:45.000Z,08:50:45,phase_started,4,1,static_post,Caminar despacio con bolsas de la compra
+2026-10-21T08:50:57.000Z,08:50:57,sync_cue,4,,static_post,sync_8 jump auto
+2026-10-21T08:51:00.000Z,08:51:00,sync_go,4,,static_post,sync_8 jump
+2026-10-21T08:51:15.000Z,08:51:15,phase_started,4,1,transition_lap,Caminar despacio con bolsas de la compra
+2026-10-21T08:51:15.000Z,08:51:15,annotation,4,1,,rpe=3
+2026-10-21T08:51:20.000Z,08:51:20,operator_advance,5,1,static_prep,
+2026-10-21T08:51:20.000Z,08:51:20,phase_started,5,1,static_prep,Barrer
+2026-10-21T08:51:32.000Z,08:51:32,sync_cue,5,,static_prep,sync_9 jump auto
+2026-10-21T08:51:35.000Z,08:51:35,sync_go,5,,static_prep,sync_9 jump
+2026-10-21T08:51:50.000Z,08:51:50,phase_started,5,1,activity_main,Barrer
+2026-10-21T08:55:50.000Z,08:55:50,activity_logged,5,1,,complete timer 240.0 s
+2026-10-21T08:55:50.000Z,08:55:50,phase_started,5,1,static_post,Barrer
+2026-10-21T08:56:02.000Z,08:56:02,sync_cue,5,,static_post,sync_10 jump auto
+2026-10-21T08:56:05.000Z,08:56:05,sync_go,5,,static_post,sync_10 jump
+2026-10-21T08:56:20.000Z,08:56:20,phase_started,5,1,transition_lap,Barrer
+2026-10-21T08:56:20.000Z,08:56:20,annotation,5,1,,rpe=3
+2026-10-21T08:56:25.000Z,08:56:25,operator_advance,6,1,static_prep,
+2026-10-21T08:56:25.000Z,08:56:25,phase_started,6,1,static_prep,Subir escaleras
+2026-10-21T08:56:37.000Z,08:56:37,sync_cue,6,,static_prep,sync_11 jump auto
+2026-10-21T08:56:40.000Z,08:56:40,sync_go,6,,static_prep,sync_11 jump
+2026-10-21T08:56:55.000Z,08:56:55,phase_started,6,1,activity_main,Subir escaleras
+2026-10-21T09:00:55.000Z,09:00:55,activity_logged,6,1,,complete timer 240.0 s
+2026-10-21T09:00:55.000Z,09:00:55,phase_started,6,1,static_post,Subir escaleras
+2026-10-21T09:01:07.000Z,09:01:07,sync_cue,6,,static_post,sync_12 jump auto
+2026-10-21T09:01:10.000Z,09:01:10,sync_go,6,,static_post,sync_12 jump
+2026-10-21T09:01:25.000Z,09:01:25,phase_started,6,1,transition_lap,Subir escaleras
+2026-10-21T09:01:25.000Z,09:01:25,annotation,6,1,,rpe=3
+2026-10-21T09:01:30.000Z,09:01:30,operator_advance,7,1,static_prep,
+2026-10-21T09:01:30.000Z,09:01:30,phase_started,7,1,static_prep,Trotar a ritmo propio
+2026-10-21T09:01:42.000Z,09:01:42,sync_cue,7,,static_prep,sync_13 jump auto
+2026-10-21T09:01:45.000Z,09:01:45,sync_go,7,,static_prep,sync_13 jump
+2026-10-21T09:02:00.000Z,09:02:00,phase_started,7,1,activity_main,Trotar a ritmo propio
+2026-10-21T09:06:00.000Z,09:06:00,activity_logged,7,1,,complete timer 240.0 s
+2026-10-21T09:06:00.000Z,09:06:00,phase_started,7,1,static_post,Trotar a ritmo propio
+2026-10-21T09:06:12.000Z,09:06:12,sync_cue,7,,static_post,sync_14 jump auto
+2026-10-21T09:06:15.000Z,09:06:15,sync_go,7,,static_post,sync_14 jump
+2026-10-21T09:06:30.000Z,09:06:30,phase_started,7,1,transition_lap,Trotar a ritmo propio
+2026-10-21T09:06:30.000Z,09:06:30,annotation,7,1,,rpe=3
+2026-10-21T09:06:35.000Z,09:06:35,operator_advance,8,1,static_prep,
+2026-10-21T09:06:35.000Z,09:06:35,phase_started,8,1,static_prep,Sentarse y levantarse 30 s
+2026-10-21T09:06:47.000Z,09:06:47,sync_cue,8,,static_prep,sync_15 clap auto
+2026-10-21T09:06:50.000Z,09:06:50,sync_go,8,,static_prep,sync_15 clap
+2026-10-21T09:07:05.000Z,09:07:05,phase_started,8,1,activity_main,Sentarse y levantarse 30 s
+2026-10-21T09:07:35.000Z,09:07:35,activity_logged,8,1,,complete timer 30.0 s
+2026-10-21T09:07:35.000Z,09:07:35,phase_started,8,1,static_post,Sentarse y levantarse 30 s
+2026-10-21T09:07:47.000Z,09:07:47,sync_cue,8,,static_post,sync_16 clap auto
+2026-10-21T09:07:50.000Z,09:07:50,sync_go,8,,static_post,sync_16 clap
+2026-10-21T09:08:05.000Z,09:08:05,phase_started,8,1,transition_lap,Sentarse y levantarse 30 s
+2026-10-21T09:08:05.000Z,09:08:05,annotation,8,1,,rpe=3
+2026-10-21T09:08:10.000Z,09:08:10,operator_advance,9,1,static_prep,
+2026-10-21T09:08:10.000Z,09:08:10,phase_started,9,1,static_prep,Marcha de 6 minutos
+2026-10-21T09:08:22.000Z,09:08:22,sync_cue,9,,static_prep,sync_17 jump auto
+2026-10-21T09:08:25.000Z,09:08:25,sync_go,9,,static_prep,sync_17 jump
+2026-10-21T09:08:40.000Z,09:08:40,phase_started,9,1,activity_main,Marcha de 6 minutos
+2026-10-21T09:14:40.000Z,09:14:40,activity_logged,9,1,,complete timer 360.0 s
+2026-10-21T09:14:40.000Z,09:14:40,phase_started,9,1,static_post,Marcha de 6 minutos
+2026-10-21T09:14:52.000Z,09:14:52,sync_cue,9,,static_post,sync_18 jump auto
+2026-10-21T09:14:55.000Z,09:14:55,sync_go,9,,static_post,sync_18 jump
+2026-10-21T09:15:10.000Z,09:15:10,phase_started,9,1,transition_lap,Marcha de 6 minutos
+2026-10-21T09:15:10.000Z,09:15:10,protocol_completed,,,,
+2026-10-21T09:15:10.000Z,09:15:10,annotation,9,1,,rpe=3
+2026-10-21T09:15:10.000Z,09:15:10,session_finished,9,,,
+2026-10-21T09:15:10.000Z,09:15:10,outputs_written,,,,
+2026-10-21T09:15:10.000Z,09:15:10,redcap_failed,,,,Falta el token de REDCap (compila con --dart-define=REDCAP_TOKEN=...)

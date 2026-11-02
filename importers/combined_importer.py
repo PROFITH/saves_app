@@ -6,6 +6,7 @@ from mad_gui import BaseImporter
 from PySide2.QtCore import QTimer
 from PySide2.QtWidgets import QApplication
 
+from importers.axivity_importer import AxivityImporter
 from importers.matrix_importer import MatrixImporter
 from importers.multi_device_dialog import MultiDeviceLoadDialog
 from importers.sens_importer import SensImporter
@@ -16,7 +17,7 @@ class UniversalStudyImporter(BaseImporter):
 
     @classmethod
     def name(cls) -> str:
-        return "Carga Universal de Sensores (SENS, Matrix, N dispositivos)"
+        return "Carga Universal de Sensores (SENS, Matrix, Axivity, N dispositivos)"
 
     def _get_sensor_t0(self, file_path: str, sensor_type: str) -> float:
         """Obtiene el timestamp inicial en ms de forma rápida."""
@@ -96,10 +97,12 @@ class UniversalStudyImporter(BaseImporter):
 
         sens_loader = SensImporter()
         matrix_loader = MatrixImporter()
+        axivity_loader = AxivityImporter()
 
         data_dict = {}
         sens_idx = 1
         mat_idx = 1
+        axivity_idx = 1
 
         for dev in devices:
             dtype = dev["type"]
@@ -113,6 +116,14 @@ class UniversalStudyImporter(BaseImporter):
                     else "SENS (acceleration)"
                 )
                 sens_idx += 1
+            elif dtype == "Axivity":
+                res = axivity_loader.load_sensor_data(dpath)
+                key = (
+                    f"Axivity #{axivity_idx}"
+                    if len([d for d in devices if d["type"] == "Axivity"]) > 1
+                    else "Axivity (acceleration)"
+                )
+                axivity_idx += 1
             else:
                 res = matrix_loader.load_sensor_data(dpath)
                 key = (
@@ -126,7 +137,14 @@ class UniversalStudyImporter(BaseImporter):
             df_sensor = raw_data["sensor_data"]
             fs = raw_data["sampling_rate_hz"]
 
-            if time_window is not None:
+            if time_window is not None and "timestamp_unix_ms" in df_sensor.columns:
+                # Crop on the native timestamps when the reader provides them.
+                w_start_ms, w_end_ms = time_window
+                ts = df_sensor["timestamp_unix_ms"]
+                df_sensor = df_sensor.loc[
+                    (ts >= w_start_ms) & (ts <= w_end_ms)
+                ].reset_index(drop=True)
+            elif time_window is not None:
                 w_start_ms, w_end_ms = time_window
                 t0_sensor_ms = self._get_sensor_t0(dpath, dtype)
 
