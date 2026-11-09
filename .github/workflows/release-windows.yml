@@ -1,0 +1,85 @@
+name: Windows build and release
+
+# On a pull request: runs the tests and builds SAVES Studio for Windows
+# (PyInstaller), keeping the installer as an artifact of the run.
+# On a tag v* (or by hand, typing the tag): also attaches the installer and
+# the portable zip to the GitHub release of that tag.
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the release (e.g. v1.0.0); created on this commit if it does not exist'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-core.txt -r requirements-gui.txt -r requirements-dev.txt pyinstaller
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build SAVES Studio (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --windowed --name SAVES_Studio
+          --collect-all av --collect-all pyqtgraph
+          --add-data "schemas;schemas"
+          main.py
+
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/SAVES_Studio/* -DestinationPath "SAVES_Studio_${{ steps.version.outputs.version }}_windows.zip"
+
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+            $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /DAppVersion=${{ steps.version.outputs.version }} installer/saves_studio.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SAVES_Studio_${{ steps.version.outputs.version }}_windows
+          path: |
+            SAVES_Studio_*_windows.zip
+            build/installer/*.exe
+          retention-days: 30
+
+      - name: Attach to the release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: SAVES Studio ${{ github.event.inputs.tag || github.ref_name }}
+          body: Install with SAVES_Studio_setup_${{ steps.version.outputs.version }}.exe, or unzip the portable zip and run SAVES_Studio.exe.
+          files: |
+            SAVES_Studio_*_windows.zip
+            build/installer/*.exe
