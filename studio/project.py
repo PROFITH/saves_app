@@ -6,7 +6,8 @@ A project lives in the session folder, one file per technician
 each sensor was worn, the video claps marked by hand, the manual corrections
 of sensor claps, the events counted on the video (steps, sit-to-stands or
 any other kind), the technician's task checklist and which plots are
-hidden. Reopening the folder with the same code restores that technician's
+hidden, and the start and end of activities corrected on the video.
+Reopening the folder with the same code restores that technician's
 work exactly where it was left; a second technician works apart, so a video
 can be reviewed by two people independently. ``saves_project.json`` is the
 file of the versions before technicians; it is read when nobody has a file
@@ -175,6 +176,12 @@ class SyncProject:
     tasks: dict[str, dict] = field(default_factory=dict)
     # Sensors whose plot is hidden (they still take part in the fit).
     hidden_plots: list[str] = field(default_factory=list)
+    # "<activity_index>:<attempt>" -> {"start_s", "end_s"} (host Unix s):
+    # start and end of an activity corrected on the video, for instance a
+    # treadmill started a few seconds after the timer. Part of the
+    # synchronization task, so a second technician who starts from it only
+    # has to check it.
+    activity_edits: dict[str, dict] = field(default_factory=dict)
     version: int = PROJECT_VERSION
 
     @property
@@ -233,6 +240,25 @@ class SyncProject:
 
     def is_excluded(self, sensor_id: str, event_id: str) -> bool:
         return event_id in self.excluded_anchors.get(sensor_id, [])
+
+    @staticmethod
+    def activity_key(index: int, attempt: int = 1) -> str:
+        return f"{int(index)}:{int(attempt or 1)}"
+
+    def activity_edit(self, index: int, attempt: int = 1) -> Optional[dict]:  # noqa: UP045
+        return self.activity_edits.get(self.activity_key(index, attempt))
+
+    def set_activity_edit(self, index: int, attempt: int, start_s: float, end_s: float) -> None:
+        """Correct the start and end (host Unix s) of one attempt of an activity."""
+        if not end_s > start_s:
+            raise ValueError("El fin de la actividad tiene que ser después del inicio.")
+        self.activity_edits[self.activity_key(index, attempt)] = {
+            "start_s": float(start_s), "end_s": float(end_s), "by": self.technician, "at": _now(),
+        }
+
+    def clear_activity_edit(self, index: int, attempt: int = 1) -> None:
+        """Back to the times written by the timer."""
+        self.activity_edits.pop(self.activity_key(index, attempt), None)
 
     def set_plot_hidden(self, sensor_id: str, hidden: bool) -> None:
         if hidden and sensor_id not in self.hidden_plots:
@@ -366,22 +392,27 @@ class SyncProject:
         """Tasks not finished yet, in checklist order."""
         return [k for k in self.task_keys() if self.task_state(k) != FINISHED]
 
-    def progress_summary(self) -> str:
-        """One line with the state of every task, for other technicians."""
+    def progress_summary(self, counts: bool = True) -> str:
+        """One line with the state of every task, for other technicians (``counts``: with how many events)."""
         parts = []
         for key in self.task_keys():
             name = "Sincronización" if key == SYNC_TASK else self.event_type(key).name
             text = f"{name}: {TASK_STATE_TEXT[self.task_state(key)].lower()}"
-            if key != SYNC_TASK and self.events.get(key):
+            if counts and key != SYNC_TASK and self.events.get(key):
                 text += f" ({len(self.events[key])})"
             parts.append(text)
         return " · ".join(parts)
 
     def has_sync_work(self) -> bool:
-        return bool(self.video_events or self.manual_anchors or any(self.excluded_anchors.values()))
+        return bool(self.video_events or self.manual_anchors or any(self.excluded_anchors.values())
+                    or self.activity_edits)
 
     def copy_sync_from(self, other: SyncProject) -> None:
-        """Start from the synchronization of another technician (not the counts)."""
+        """
+        Start from the synchronization and the corrected activities of
+        another technician (not the counts). The synchronization task starts
+        as «Iniciada»: this technician checks it and marks it finished.
+        """
         self.manifest_path = other.manifest_path
         self.sensors = [SensorEntry(**asdict(s)) for s in other.sensors]
         self.videos = [VideoEntry(**asdict(v)) for v in other.videos]
@@ -390,9 +421,13 @@ class SyncProject:
         self.video_events = dict(other.video_events)
         self.manual_anchors = {sid: dict(a) for sid, a in other.manual_anchors.items()}
         self.excluded_anchors = {sid: list(e) for sid, e in other.excluded_anchors.items()}
-        if other.task_state(SYNC_TASK) != NOT_STARTED:
-            # Still the other technician's work: "by" says who did it.
-            self.tasks[SYNC_TASK] = {**other.tasks[SYNC_TASK], "copied_from": other.technician}
+        self.activity_edits = {k: dict(v) for k, v in other.activity_edits.items()}
+        if other.task_state(SYNC_TASK) != NOT_STARTED or other.has_sync_work():
+            self.tasks[SYNC_TASK] = {
+                "state": STARTED, "by": self.technician, "started_at": _now(),
+                "copied_from": other.technician,
+                "copied_state": other.task_state(SYNC_TASK),
+            }
 
     # ------------------------------------------------------------------
     # Persistence
@@ -447,6 +482,11 @@ class SyncProject:
             events=events,
             tasks={k: dict(v) for k, v in (data.get("tasks") or {}).items() if isinstance(v, dict)},
             hidden_plots=[str(s) for s in data.get("hidden_plots", [])],
+            activity_edits={
+                str(k): {**v, "start_s": float(v["start_s"]), "end_s": float(v["end_s"])}
+                for k, v in (data.get("activity_edits") or {}).items()
+                if isinstance(v, dict) and "start_s" in v and "end_s" in v
+            },
         )
         return project
 

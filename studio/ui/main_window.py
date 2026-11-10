@@ -58,7 +58,14 @@ from studio.discovery import (
     discover,
     sensor_entry_for,
 )
-from studio.engine import FAIR_RMSE_MS, GOOD_RMSE_MS, VIDEO, SyncEngine, analyze_signal
+from studio.engine import (
+    FAIR_RMSE_MS,
+    GOOD_RMSE_MS,
+    VIDEO,
+    SyncEngine,
+    analyze_signal,
+    nearest_activity,
+)
 from studio.export import label_times, read_phases
 from studio.project import (
     FINISHED,
@@ -411,6 +418,7 @@ class MainWindow(QMainWindow):
         self.plots.anchor_action.connect(self._anchor_action)
         self.plots.add_anchor.connect(self._anchor_moved)
         self.plots.plot_visibility.connect(self._plot_visibility)
+        self.plots.activity_edit.connect(self.edit_activity)
         centre.addWidget(self.plots)
         self.tabs = QTabWidget()
         claps_box = QWidget()
@@ -508,6 +516,8 @@ class MainWindow(QMainWindow):
             "D": lambda: self.mark_event("R"),
             "Backspace": self.remove_event,
             "Ctrl+Z": self.undo_event,
+            "I": lambda: self.edit_activity_at_video("start"),
+            "F": lambda: self.edit_activity_at_video("end"),
         }
         for key, slot in bindings.items():
             shortcut = QShortcut(QKeySequence(key), self)
@@ -523,6 +533,8 @@ class MainWindow(QMainWindow):
             "N / P: evento (palmada o salto) siguiente / anterior\n"
             "M: marcar el evento en el vídeo (fotograma actual)\n"
             "Supr: borrar la marca del vídeo del evento elegido\n"
+            "I / F: la actividad más cercana empieza / termina en este fotograma\n"
+            "    (p. ej. la cinta arrancó tarde; clic derecho en la gráfica para volver a la hora del cronómetro)\n"
             "S: marcar lo que cuentas (pestaña «Conteo») en el fotograma actual;\n"
             "    A / D: lado izquierdo / derecho, si ese tipo los distingue\n"
             "Retroceso: borrar la marca más cercana · Ctrl+Z: deshacer el último cambio de ese tipo\n"
@@ -1309,6 +1321,52 @@ class MainWindow(QMainWindow):
         self.project.set_manual_anchor(sensor_id, event_id, native)
         self._changed(message=f"Palmada {event_id} de {sensor_id} corregida a mano")
 
+    def edit_activity_at_video(self, which: str) -> None:
+        """I / F: the activity nearest to the video frame starts / ends at that frame."""
+        if self.engine is None or self.video.reader is None or self.video.current_time is None:
+            self.statusBar().showMessage("Abre el vídeo para corregir el inicio o el fin de una actividad.", 5000)
+            return
+        self.edit_activity(which, float(self.engine.video_to_display(self.video.current_time)))
+
+    def edit_activity(self, which: str, display_s: float) -> None:
+        """
+        Correct the start or end of the activity nearest to ``display_s``
+        (host clock), or put back the timer's times ("restore").
+        """
+        if self.engine is None or self.project is None:
+            return
+        activity = nearest_activity(self.engine.session, display_s, which)
+        if activity is None:
+            return
+        index, attempt = activity.activity_index, activity.attempt
+        name = activity.activity_name or f"Actividad {index}"
+        if which == "restore":
+            self.project.clear_activity_edit(index, attempt)
+            message = f"«{name}» vuelve a la hora del cronómetro"
+        else:
+            start, end = activity.start_time.timestamp(), activity.end_time.timestamp()
+            if which == "start":
+                start = display_s
+            else:
+                end = display_s
+            if not end > start:
+                self.statusBar().showMessage(
+                    f"No se ha cambiado «{name}»: el fin quedaría antes del inicio.", 6000)
+                return
+            original = self.engine.original_activity(index, attempt) or activity
+            if (abs(start - original.start_time.timestamp()) < 0.001
+                    and abs(end - original.end_time.timestamp()) < 0.001):
+                self.project.clear_activity_edit(index, attempt)
+            else:
+                self.project.set_activity_edit(index, attempt, start, end)
+            moved = start - original.start_time.timestamp() if which == "start" else end - original.end_time.timestamp()
+            message = (f"{'Inicio' if which == 'start' else 'Fin'} de «{name}» corregido "
+                       f"({moved:+.1f} s respecto al cronómetro)")
+        self.engine.apply_activity_edits()
+        self._phases = None
+        self.plots.refresh_static()
+        self._changed(message=message)
+
     def _anchor_action(self, sensor_id: str, event_id: str, action: str) -> None:
         if action == "exclude":
             self.project.set_excluded(sensor_id, event_id, True)
@@ -1484,7 +1542,7 @@ class MainWindow(QMainWindow):
 
     def _session_phases(self):
         if self._phases is None and self.engine is not None:
-            self._phases = read_phases(self.project.folder, self.engine.session)
+            self._phases = read_phases(self.project.folder, self.engine.session, self.project.activity_edits)
         return self._phases
 
     def _activity_names(self) -> dict[int, str]:

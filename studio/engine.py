@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -104,12 +105,52 @@ class SensorStatus:
     note: str = ""
 
 
+def nearest_activity(session: Session, t: float, which: str):
+    """
+    The activity whose start (``which`` = "start") or end ("end") is
+    nearest to ``t`` (host Unix s); for "restore", the one ``t`` falls in,
+    else the nearest. None without activities.
+    """
+    activities = [a for a in session.activities if a.activity_kind != "calibration"] or list(session.activities)
+    if not activities:
+        return None
+
+    def distance(a) -> float:
+        start, end = a.start_time.timestamp(), a.end_time.timestamp()
+        if which == "start":
+            return abs(t - start)
+        if which == "end":
+            return abs(t - end)
+        return 0.0 if start <= t <= end else min(abs(t - start), abs(t - end))
+
+    return min(activities, key=distance)
+
+
+def with_activity_edits(session: Session, edits: dict[str, dict]) -> Session:
+    """The session with the start and end of the activities corrected on the video."""
+    if not edits:
+        return session
+    activities = []
+    for activity in session.activities:
+        edit = edits.get(SyncProject.activity_key(activity.activity_index, activity.attempt))
+        if edit is None:
+            activities.append(activity)
+            continue
+        start = datetime.fromtimestamp(float(edit["start_s"]), tz=timezone.utc)
+        end = datetime.fromtimestamp(float(edit["end_s"]), tz=timezone.utc)
+        activities.append(replace(activity, start_time=start, end_time=end,
+                                  duration_seconds=(end - start).total_seconds()))
+    return replace(session, activities=activities)
+
+
 class SyncEngine:
     """Holds detected claps and fits for one project."""
 
     def __init__(self, project: SyncProject, session: Session):
         self.project = project
-        self.session = session
+        # The session as the timer wrote it, and with the activities corrected.
+        self.original_session = session
+        self.session = with_activity_edits(session, project.activity_edits)
         self.signals: dict[str, SignalData] = {}
         self.auto_anchors: dict[str, dict[str, SyncAnchor]] = {}
         self.coverage: dict[str, dict] = {}
@@ -540,6 +581,17 @@ class SyncEngine:
                 result.note = "fewer than two claps shared with the reference"
             results[sid] = result
         return results
+
+    def apply_activity_edits(self) -> None:
+        """Use the project's corrected activities (after a change)."""
+        self.session = with_activity_edits(self.original_session, self.project.activity_edits)
+
+    def original_activity(self, index: int, attempt: int = 1):
+        """The activity as the timer wrote it."""
+        for activity in self.original_session.activities:
+            if activity.activity_index == index and activity.attempt == attempt:
+                return activity
+        return None
 
     def activity_labels(self, sensor_id: str) -> pd.DataFrame:
         """Protocol activities expressed in the sensor's own clock."""

@@ -505,7 +505,8 @@ def test_main_window_checklist_technicians_and_plots(clean_demo, monkeypatch, tm
     _wait(app, lambda: window.engine is not None and len(window.engine.signals) == 4)
     project = window.project
     assert project.technician == "CD"
-    assert project.task_state("sync") == "finished" and project.tasks["sync"]["by"] == "AB"
+    # CD checks it and marks it finished: until then it is «Iniciada».
+    assert project.task_state("sync") == "started" and project.tasks["sync"]["by"] == "CD"
     assert "copiada de AB" in window.tasks_table.item(0, 2).text()
     assert not project.events.get("sit_to_stand")
     # New for CD, so it gets the kind remembered for new sessions.
@@ -743,10 +744,79 @@ def test_technician_dialog_says_what_will_open(tmp_path, monkeypatch):
     assert "Seguirás donde lo dejaste" in dialog.status.text()
     dialog.code_edit.setText("cd")
     assert dialog.code == "CD"
+    # The second reviewer starts from the first one's synchronization by default.
+    assert "sincronización y las actividades de AB" in dialog.status.text()
+    assert dialog.choice() == ("CD", "AB")
+    dialog.copy_check.setChecked(False)
     assert "Empezarás de cero" in dialog.status.text()
     assert dialog.choice() == ("CD", None)
-    dialog.copy_check.setChecked(True)
-    assert "sincronización de AB" in dialog.status.text()
-    assert dialog.choice() == ("CD", "AB")
     dialog.code_edit.setText("")
     assert not dialog.buttons.button(QDialogButtonBox.Ok).isEnabled()
+
+
+def test_activities_corrected_on_the_video_move_their_phases_and_export(engine, tmp_path):
+    from studio.export import apply_activity_edits, read_phases
+
+    session = engine.session
+    activity = session.activities[1]
+    index, attempt = activity.activity_index, activity.attempt
+    start, end = activity.start_time.timestamp(), activity.end_time.timestamp()
+    # The treadmill started 5 s after the timer.
+    engine.project.set_activity_edit(index, attempt, start + 5.0, end)
+    engine.apply_activity_edits()
+    moved = engine.session.activities[1]
+    assert moved.start_time.timestamp() == pytest.approx(start + 5.0)
+    assert moved.duration_seconds == pytest.approx(end - start - 5.0)
+    assert engine.original_session.activities[1].start_time.timestamp() == pytest.approx(start)
+
+    phases = read_phases(engine.project.folder, session, engine.project.activity_edits)
+    mine = phases[(phases["activity_index"] == index) & (phases["attempt"] == attempt)]
+    main = mine[mine["phase"] == "activity_main"]
+    assert len(main) == 1 and main["start_s"].iloc[0] == pytest.approx(start + 5.0)
+    # The 5 s it lost stay as a still phase, and no phase overlaps another.
+    prep = mine[(mine["phase"] == "static_prep") & np.isclose(mine["end_s"], start + 5.0)]
+    assert len(prep) == 1
+    ordered = phases.sort_values("start_s")
+    assert (ordered["start_s"].to_numpy()[1:] >= ordered["end_s"].to_numpy()[:-1] - 1e-6).all()
+
+    written = {p.name for p in engine.export(tmp_path)}
+    assert "activities.csv" in written
+    table = pd.read_csv(tmp_path / "activities.csv")
+    row = table[(table["activity_index"] == index) & (table["attempt"] == attempt)].iloc[0]
+    assert row["start_unix_ms"] == round((start + 5.0) * 1000)
+    assert row["timer_start_unix_ms"] == round(start * 1000)
+    assert row["corrected_by"] == "?"  # the demo project has no technician
+    other = table[table["activity_index"] != index].iloc[0]
+    assert pd.isna(other["corrected_by"]) or other["corrected_by"] == ""
+
+    # Starting earlier takes the time from the phases before it.
+    earlier = apply_activity_edits(read_phases(engine.project.folder, session),
+                                   {f"{index}:{attempt}": {"start_s": start - 3.0, "end_s": end}})
+    before = earlier[(earlier["end_s"] > start - 3.0) & (earlier["start_s"] < start - 3.0)]
+    assert before.empty
+    engine.project.clear_activity_edit(index, attempt)
+    engine.apply_activity_edits()
+    assert engine.session.activities[1].start_time.timestamp() == pytest.approx(start)
+
+
+
+def test_main_window_corrects_an_activity_on_the_video(clean_demo, monkeypatch, tmp_path):
+    app, window = _window(tmp_path, monkeypatch)
+    window.open_folder(clean_demo, technician="T1")
+    _wait(app, lambda: window.engine is not None and len(window.engine.signals) == 4 and window.project.video_events)
+    activity = window.engine.session.activities[1]
+    start = activity.start_time.timestamp()
+    # The treadmill starts 4 s late: I on that frame.
+    window.video.seek(float(window.engine.display_to_video(start + 4.0)))
+    window.edit_activity_at_video("start")
+    moved = window.engine.session.activities[1]
+    assert moved.start_time.timestamp() == pytest.approx(start + 4.0, abs=0.1)
+    assert window.project.activity_edit(activity.activity_index, activity.attempt)["by"] == "T1"
+    assert window.project.task_state("sync") == "started"
+    assert "corregido" in window.statusBar().currentMessage()
+    # The end before the start is refused.
+    window.edit_activity("end", start)
+    assert window.engine.session.activities[1].end_time == moved.end_time
+    window.edit_activity("restore", start + 10.0)
+    assert window.project.activity_edit(activity.activity_index, activity.attempt) is None
+    assert window.engine.session.activities[1].start_time.timestamp() == pytest.approx(start)

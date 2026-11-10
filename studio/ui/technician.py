@@ -67,7 +67,8 @@ class TechnicianDialog(QDialog):
         layout.addLayout(row)
 
         if self.others or self.unreadable:
-            lines = [f"<b>{code}</b>: {project.progress_summary()}" for code, project in self.others.items()]
+            # Without the number of events: the counts of each technician stay blind.
+            lines = [f"<b>{code}</b>: {project.progress_summary(counts=False)}" for code, project in self.others.items()]
             lines += [f"<b>{code}</b>: <span style='color:#c62828'>archivo ilegible</span>" for code in self.unreadable]
             others = QLabel("Trabajo guardado en esta carpeta:<br>" + "<br>".join(lines))
             others.setWordWrap(True)
@@ -75,14 +76,22 @@ class TechnicianDialog(QDialog):
             layout.addWidget(others)
 
         copy_row = QHBoxLayout()
-        self.copy_check = QCheckBox("Empezar con la sincronización de")
+        self.copy_check = QCheckBox("Empezar con la sincronización y las actividades de")
         self.copy_box = QComboBox()
-        for code, project in self.others.items():
-            if project.has_sync_work() or project.task_state(SYNC_TASK) != "not_started":
-                self.copy_box.addItem(code, code)
+        # The finished synchronizations first: the second reviewer only checks them.
+        sources = [(code, project) for code, project in self.others.items()
+                   if project.has_sync_work() or project.task_state(SYNC_TASK) != "not_started"]
+        sources.sort(key=lambda item: item[1].task_state(SYNC_TASK) != "finished")
+        for code, project in sources:
+            done = " (finalizada)" if project.task_state(SYNC_TASK) == "finished" else ""
+            self.copy_box.addItem(code + done, code)
+        # By default the second reviewer starts from it: the counts are
+        # always their own.
+        self.copy_check.setChecked(bool(sources))
         self.copy_check.setToolTip(
-            "Copia las palmadas marcadas y las correcciones de ese técnico; los conteos no se copian. "
-            "Déjalo sin marcar para una revisión independiente."
+            "Copia las palmadas marcadas, las correcciones y el inicio y fin de las actividades corregidos por ese "
+            "técnico, para que solo tengas que revisarlos. Los conteos (pasos, sentarse y levantarse) no se copian: "
+            "los haces tú desde cero."
         )
         self.copy_check.toggled.connect(self._update)
         copy_row.addWidget(self.copy_check)
@@ -134,8 +143,9 @@ class TechnicianDialog(QDialog):
         elif self.legacy:
             text = "Seguirás con el trabajo guardado en esta carpeta antes de los códigos de técnico."
         elif can_copy and self.copy_check.isChecked():
-            text = (f"Empezarás con la sincronización de {self.copy_box.currentText()}; "
-                    "los conteos los haces tú desde cero.")
+            text = (f"Empezarás con la sincronización y las actividades de {self.copy_box.currentData()}: "
+                    "revísalas y marca la sincronización como finalizada. "
+                    "Los conteos los haces tú desde cero, sin ver los suyos.")
         else:
             text = "Empezarás de cero en esta carpeta."
         self.status.setText(text)
