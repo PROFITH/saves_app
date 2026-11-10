@@ -167,8 +167,14 @@ encabezado de este LEEME dice cuáles.
 activities.csv   Actividades, una fila por intento (attempt), con su
                  inicio y fin, MET, RPE, la instancia de lab_activity en
                  REDCap (redcap_instance) y lo contado en el vídeo en cada
-                 una (steps_video, <tipo>_video).
-phases.csv       Cada fase de cada actividad con su inicio y fin.
+                 una (steps_video, <tipo>_video). Si un técnico corrigió
+                 en el vídeo el inicio o el fin (por ejemplo, la cinta
+                 arrancó tarde), start/end son los corregidos,
+                 timer_start_unix_ms/timer_end_unix_ms los que escribió
+                 el cronómetro y corrected_by quién lo corrigió.
+phases.csv       Cada fase de cada actividad con su inicio y fin (con la
+                 fase principal de las actividades corregidas ya
+                 ajustada).
 steps.csv        Pasos marcados en el vídeo (si se han contado), con el
                  pie (foot: L izquierdo, R derecho, vacío si no se
                  distinguió).
@@ -218,9 +224,13 @@ def _iso(unix_s: float) -> str:
     return datetime.fromtimestamp(unix_s, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def read_phases(folder: str | Path, session) -> pd.DataFrame:
+def read_phases(folder: str | Path, session, edits: Optional[dict[str, dict]] = None) -> pd.DataFrame:  # noqa: UP045
     """
     Phases of the protocol with their start and end (host Unix s).
+
+    With ``edits`` (the activities corrected on the video, see
+    :func:`apply_activity_edits`) the main phase of each corrected activity
+    takes the corrected times.
 
     Taken from the timer's log (session_events.csv): each ``phase_started``
     opens a phase that lasts until the next one; a pause is a phase of its
@@ -280,6 +290,53 @@ def read_phases(folder: str | Path, session) -> pd.DataFrame:
             for a in session.activities
         ]
     frame = pd.DataFrame(rows, columns=columns)
+    frame = frame.sort_values("start_s", kind="stable").reset_index(drop=True)
+    return apply_activity_edits(frame, edits) if edits else frame
+
+
+def apply_activity_edits(phases: pd.DataFrame, edits: dict[str, dict]) -> pd.DataFrame:
+    """
+    Phases with the main phase of each corrected activity at its new times.
+
+    The corrected main phase takes its time from whatever phase was there
+    (the other phases are cut around it). What the activity loses stays as
+    its own still phase: before the new start, ``static_prep``; after the new
+    end, ``static_post`` (for instance, standing on the treadmill before it
+    started).
+    """
+    rows = phases.to_dict("records")
+    for key, edit in edits.items():
+        try:
+            index, attempt = (int(x) for x in key.split(":"))
+            start, end = float(edit["start_s"]), float(edit["end_s"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not end > start:
+            continue
+        mine = [r for r in rows if r["activity_index"] == index and (r["attempt"] or 1) == attempt
+                and r["phase"] == "activity_main"]
+        old_start = min((r["start_s"] for r in mine), default=start)
+        old_end = max((r["end_s"] for r in mine), default=end)
+        rows = [r for r in rows if not any(r is m for m in mine)]
+        cut: list[dict] = []
+        for r in rows:
+            if r["end_s"] <= start or r["start_s"] >= end:
+                cut.append(r)
+                continue
+            if r["start_s"] < start:
+                cut.append({**r, "end_s": start})
+            if r["end_s"] > end:
+                cut.append({**r, "start_s": end})
+        rows = cut
+        rows.append({"activity_index": index, "attempt": attempt, "phase": "activity_main",
+                     "start_s": start, "end_s": end})
+        if start > old_start:
+            rows.append({"activity_index": index, "attempt": attempt, "phase": "static_prep",
+                         "start_s": old_start, "end_s": min(start, old_end)})
+        if end < old_end:
+            rows.append({"activity_index": index, "attempt": attempt, "phase": "static_post",
+                         "start_s": max(end, old_start), "end_s": old_end})
+    frame = pd.DataFrame(rows, columns=phases.columns)
     return frame.sort_values("start_s", kind="stable").reset_index(drop=True)
 
 
@@ -346,7 +403,7 @@ def export_dataset(engine: SyncEngine, out_dir: str | Path, margin_s: float = EX
     session = engine.session
     folder = Path(engine.project.folder)
     names = {a.activity_index: a.activity_name or f"Actividad {a.activity_index}" for a in session.activities}
-    phases = read_phases(folder, session)
+    phases = read_phases(folder, session, engine.project.activity_edits)
     start = session.start_time.timestamp() - margin_s
     end = session.end_time.timestamp() + margin_s
     written: list[Path] = []
@@ -696,6 +753,17 @@ def steps_per_activity(engine: SyncEngine, steps: pd.DataFrame, phases: pd.DataF
     return events_per_activity(engine, STEPS, steps, phases, names)
 
 
+def _timer_times(engine: SyncEngine, activity) -> dict:
+    """The times the timer wrote and who corrected them on the video (empty if nobody did)."""
+    original = engine.original_activity(activity.activity_index, activity.attempt) or activity
+    edit = engine.project.activity_edit(activity.activity_index, activity.attempt)
+    return {
+        "timer_start_unix_ms": round(original.start_time.timestamp() * 1000),
+        "timer_end_unix_ms": round(original.end_time.timestamp() * 1000),
+        "corrected_by": (edit.get("by") or "?") if edit else "",
+    }
+
+
 def activity_table(engine: SyncEngine, folder: Path, counted: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Activities with their times, the timer's markers and the events counted on the video."""
     rows = []
@@ -714,6 +782,7 @@ def activity_table(engine: SyncEngine, folder: Path, counted: dict[str, pd.DataF
             "end_unix_ms": int(round(a.end_time.timestamp() * 1000)),
             "duration_s": a.duration_seconds,
             "planned_duration_s": a.planned_duration_seconds,
+            **_timer_times(engine, a),
         })
     frame = pd.DataFrame(rows)
     markers_path = folder / "activity_markers.csv"

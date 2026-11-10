@@ -18,7 +18,7 @@ from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QMenu, QVBoxLayout, QWidget
 
-from studio.engine import SyncEngine
+from studio.engine import SyncEngine, nearest_activity
 
 SENSOR_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2"]
 AXIS_COLORS = {"x": "#d62728", "y": "#2ca02c", "z": "#1f77b4"}
@@ -49,6 +49,7 @@ class SignalStack(QWidget):
     add_anchor = Signal(str, str, float)    # sensor_id, event_id, display time
     range_changed = Signal(float, float)
     plot_visibility = Signal(str, str)      # sensor_id, "hide" | "only"
+    activity_edit = Signal(str, float)      # "start" | "end" | "restore", display time
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -378,10 +379,31 @@ class SignalStack(QWidget):
             menu.addSeparator()
             menu.addAction(f"Ir a la ventana {eid}", lambda: self.anchor_action.emit(sid, eid, "focus"))
             menu.addSeparator()
+        self._activity_actions(menu, x)
         menu.addAction(f"Ocultar el gráfico de {sid}", lambda: self.plot_visibility.emit(sid, "hide"))
         if len(self.plots) > 1:
             menu.addAction(f"Ver solo el gráfico de {sid}", lambda: self.plot_visibility.emit(sid, "only"))
         menu.exec(screen_pos.toPoint())
+
+    def _activity_actions(self, menu: QMenu, x: float) -> None:
+        """Correct the start or end of the nearest activity at ``x``."""
+        session = self.engine.session if self.engine is not None else None
+        if session is None or not session.activities:
+            return
+
+        def name(a) -> str:
+            text = a.activity_name or f"Actividad {a.activity_index}"
+            return text + (f" (intento {a.attempt})" if a.attempt > 1 else "")
+
+        first = nearest_activity(session, x, "start")
+        last = nearest_activity(session, x, "end")
+        menu.addAction(f"Inicio de «{name(first)}» aquí  [I]", lambda: self.activity_edit.emit("start", x))
+        menu.addAction(f"Fin de «{name(last)}» aquí  [F]", lambda: self.activity_edit.emit("end", x))
+        here = nearest_activity(session, x, "restore")
+        if self.engine.project.activity_edit(here.activity_index, here.attempt):
+            menu.addAction(f"Volver a la hora del cronómetro en «{name(here)}»",
+                           lambda: self.activity_edit.emit("restore", x))
+        menu.addSeparator()
 
     def _marker_moved(self, line) -> None:
         self.anchor_moved.emit(line.sensor_id, line.event_id, float(line.value()))

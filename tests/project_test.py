@@ -110,8 +110,10 @@ def test_a_second_technician_can_start_from_the_first_ones_synchronization(tmp_p
     assert second.manual_anchors == {"sens": {"sync_2": 123.0}}
     assert second.is_excluded("sens", "sync_3")
     assert not second.events.get("steps")
-    assert second.task_state("sync") == FINISHED
-    assert second.tasks["sync"]["by"] == "AB" and second.tasks["sync"]["copied_from"] == "AB"
+    # The second technician checks it: started, and finished when they confirm.
+    assert second.task_state("sync") == "started"
+    assert second.tasks["sync"]["by"] == "CD" and second.tasks["sync"]["copied_from"] == "AB"
+    assert second.tasks["sync"]["copied_state"] == FINISHED
     # Copies, not the same objects.
     second.video_events["sync_2"] = 9.0
     assert "sync_2" not in first.video_events
@@ -124,3 +126,25 @@ def test_hidden_plots_follow_the_sensors(tmp_path):
     assert project.hidden_plots == ["sens"]
     project.remove_sensor("sens")
     assert project.hidden_plots == []
+
+
+def test_corrected_activities_are_saved_and_go_with_the_synchronization(tmp_path):
+    first = SyncProject(folder=str(tmp_path), technician="AB")
+    first.set_activity_edit(4, 1, 1000.0, 1120.0)
+    assert first.has_sync_work()
+    with pytest.raises(ValueError):
+        first.set_activity_edit(4, 1, 1120.0, 1000.0)
+    first.add_event("steps", 3.0)
+    first.save()
+    loaded = SyncProject.load(tmp_path, "AB")
+    assert loaded.activity_edit(4, 1)["start_s"] == 1000.0
+    assert loaded.activity_edit(4, 1)["by"] == "AB"
+    second = SyncProject(folder=str(tmp_path), technician="CD")
+    second.copy_sync_from(loaded)
+    assert second.activity_edit(4, 1)["end_s"] == 1120.0
+    assert not second.events.get("steps")
+    second.clear_activity_edit(4, 1)
+    assert loaded.activity_edit(4, 1) is not None
+    # Without the number of events, so the counts stay blind.
+    assert "(1)" not in loaded.progress_summary(counts=False)
+

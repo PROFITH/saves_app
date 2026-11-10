@@ -216,7 +216,7 @@ def count_records(engine: SyncEngine, participant: Participant) -> CountRecords:
 
     folder = Path(project.folder)
     session = engine.session
-    phases = read_phases(folder, session)
+    phases = read_phases(folder, session, project.activity_edits)
     names = {a.activity_index: a.activity_name or f"Actividad {a.activity_index}" for a in session.activities}
     result = CountRecords(participant=participant, technician=technician, kinds=kinds, instances_from=source,
                           session_id=session.session_id)
