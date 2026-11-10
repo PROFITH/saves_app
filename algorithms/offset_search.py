@@ -23,6 +23,13 @@ from models import Session
 # Search range of offline sensors and of sensors already on the host clock.
 OFFLINE_SEARCH_S = 2 * 3600 + 600
 HOST_SEARCH_S = 10.0
+# SENS motion stamps its samples in UTC with the clock the phone app sets
+# over the network (the export carries ``utc``, ``local`` and ``unixts``),
+# so it is never hours off. Searching two hours of a thigh recording, full
+# of steps and sit-to-stands, finds a false match long before the true one,
+# above all when the thigh does not feel the clap of the first sync event.
+NETWORK_CLOCK_SEARCH_S = 120.0
+NETWORK_CLOCK_SENSORS = ("sens",)
 # How far from the expected time an event may be once the offset is applied.
 CUE_TOLERANCE_S = 1.0
 
@@ -196,8 +203,15 @@ def _bin_offset(d: np.ndarray, owner: np.ndarray, start: int, width: float) -> f
 
 
 def search_range_for(sensor_type: str) -> float:
-    """Sensors written by the protocol app are already on the host clock."""
-    return HOST_SEARCH_S if sensor_type == "polar_acc" else OFFLINE_SEARCH_S
+    """
+    Sensors written by the protocol app are already on the host clock, and
+    SENS motion on a network clock in UTC; the rest may be hours off.
+    """
+    if sensor_type == "polar_acc":
+        return HOST_SEARCH_S
+    if sensor_type in NETWORK_CLOCK_SENSORS:
+        return NETWORK_CLOCK_SEARCH_S
+    return OFFLINE_SEARCH_S
 
 
 def describe_optional(search: Optional[OffsetSearch]) -> str:  # noqa: UP045
