@@ -2,3 +2,5 @@
 numpy>=1.21
 pandas>=2.0
 scipy>=1.7
+# HTTPS to REDCap checked by the system's certificate store (Windows, macOS)
+truststore>=0.9

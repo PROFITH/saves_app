@@ -204,7 +204,7 @@ class FakeResponse(io.BytesIO):
 def test_the_api_reads_and_sends_with_the_token(monkeypatch):
     calls = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         body = dict(pd.Series(dict(x.split("=", 1) for x in request.data.decode().split("&"))))
         calls.append((request.full_url, body))
         if body["content"] == "record" and "data" not in body:
@@ -231,7 +231,7 @@ def test_the_api_reads_and_sends_with_the_token(monkeypatch):
 def test_the_project_of_the_token_says_whether_records_go_with_their_event(monkeypatch, tmp_path):
     calls = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         body = dict(x.split("=", 1) for x in request.data.decode().split("&"))
         calls.append(body)
         if body["content"] == "project":
@@ -252,7 +252,7 @@ def test_the_project_of_the_token_says_whether_records_go_with_their_event(monke
     path = redcap.write_import_csv(records, tmp_path / redcap.CSV_NAME)
     assert "redcap_event_name" not in pd.read_csv(path, dtype=str).columns
 
-    monkeypatch.setattr(redcap.urllib.request, "urlopen", lambda request, timeout: FakeResponse(b"<html>REDCap</html>"))
+    monkeypatch.setattr(redcap.urllib.request, "urlopen", lambda request, timeout, context=None: FakeResponse(b"<html>REDCap</html>"))
     with pytest.raises(redcap.RedcapError, match="/api/"):
         redcap.project_info("T" * 32, "https://redcap.example/")
 
@@ -273,7 +273,7 @@ def test_addresses_are_checked_and_tokens_masked(monkeypatch):
 
 def test_refusals_of_redcap_say_what_to_do(monkeypatch):
     def refuse(code, message):
-        def fake_urlopen(request, timeout):
+        def fake_urlopen(request, timeout, context=None):
             raise urllib.error.HTTPError(request.full_url, code, "", {}, io.BytesIO(json.dumps({"error": message}).encode()))
         monkeypatch.setattr(redcap.urllib.request, "urlopen", fake_urlopen)
 
@@ -301,3 +301,21 @@ def test_a_finished_count_waits_to_be_sent_until_it_is(tmp_path):
     # The synchronization never goes to REDCap.
     project.set_task_state(SYNC_TASK, FINISHED)
     assert not redcap.needs_sending(project, SYNC_TASK)
+
+
+def test_https_to_redcap_is_checked_by_the_system(monkeypatch):
+    """The certificate check goes to the system store (truststore), never off."""
+    import ssl
+
+    contexts = []
+
+    def fake_urlopen(request, timeout, context=None):
+        contexts.append(context)
+        return FakeResponse(b"ok")
+
+    monkeypatch.setattr(redcap.urllib.request, "urlopen", fake_urlopen)
+    assert redcap._post("https://minerva.ugr.es/api/", [("content", "version")]) == "ok"
+    context = contexts[0]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -279,6 +280,24 @@ def write_import_csv(records: list[dict], path: str | Path) -> Path:
 # REDCap API
 # ----------------------------------------------------------------------
 
+def _ssl_context() -> ssl.SSLContext:
+    """HTTPS checked by the system (Windows, macOS) through ``truststore``.
+
+    Python's own check uses the root certificates it finds but never fetches
+    a missing intermediate certificate, nor a root Windows has not installed
+    yet; the browser asks Windows, which does both. On a new computer
+    minerva.ugr.es failed with ``CERTIFICATE_VERIFY_FAILED: unable to get
+    local issuer certificate`` while the browser opened it (12/11/2026).
+    ``truststore`` hands the check to the system, as the browser does; it is
+    never turned off. Without the package, Python's default check.
+    """
+    try:
+        import truststore
+    except ImportError:
+        return ssl.create_default_context()
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
 def _post(url: str, data: list[tuple[str, str]], timeout: float = 30.0) -> str:
     request = urllib.request.Request(
         url,
@@ -286,7 +305,7 @@ def _post(url: str, data: list[tuple[str, str]], timeout: float = 30.0) -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", "replace")
